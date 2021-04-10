@@ -1,0 +1,50 @@
+{
+    "name": "arlisaha/chozo-core",
+    "description": "A Slim framework skeleton.",
+    "keywords": [
+        "microframework"
+    ],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Yann Di Serio",
+            "email": "yann.diserio.pro@gmail.com"
+        }
+    ],
+    "require": {
+        "php": "^7.2",
+        "doctrine/orm": "^2",
+        "ext-json": "*",
+        "guzzlehttp/psr7": "^1.8",
+        "monolog/monolog": "^2.2",
+        "php-di/php-di": "^6.3",
+        "slim/slim": "^4.7",
+        "swiftmailer/swiftmailer": "^6.0",
+        "symfony/yaml": "^5.2",
+        "symfony/console": "^5.2"
+    },
+    "require-dev": {
+        "jangregor/phpstan-prophecy": "^0.8.1",
+        "phpstan/extension-installer": "^1.1.0",
+        "phpstan/phpstan": "^0.12.80",
+        "phpunit/phpunit": "^8.5"
+    },
+    "config": {
+        "process-timeout": 0,
+        "sort-packages": true
+    },
+    "autoload": {
+        "psr-4": {
+            "Arlisaha\\Chozo\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "start": "php -S localhost:8080 -t public",
+        "test": "phpunit"
+    }
+}
