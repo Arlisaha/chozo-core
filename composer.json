@@ -16,9 +16,11 @@
         "ext-json": "*",
         "guzzlehttp/psr7": "^1.8",
         "php-di/php-di": "^6.3",
+        "php-di/slim-bridge": "^3.1",
         "slim/slim": "^4.7",
-        "symfony/yaml": "^5.2",
-        "symfony/console": "^5.2"
+        "symfony/console": "^5.2",
+        "symfony/finder": "^5.2",
+        "symfony/yaml": "^5.2"
     },
     "require-dev": {
         "jangregor/phpstan-prophecy": "^0.8.1",
