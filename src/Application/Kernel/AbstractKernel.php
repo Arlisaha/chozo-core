@@ -9,12 +9,13 @@ use Arlisaha\Chozo\Application\Config\Parameters\Parameters;
 use Arlisaha\Chozo\Application\Config\Parameters\ParametersInterface;
 use Arlisaha\Chozo\Application\Config\Settings\Settings;
 use Arlisaha\Chozo\Application\Config\Settings\SettingsInterface;
+use Arlisaha\Chozo\Application\PathBuilder\PathBuilder;
+use Arlisaha\Chozo\Application\PathBuilder\PathBuilderInterface;
 use Arlisaha\Chozo\Exception\CacheDirectoryException;
 use Arlisaha\Chozo\Exception\ConfigFileException;
 use Arlisaha\Chozo\Exception\KernelNotCreatedException;
 use Arlisaha\Chozo\Exception\MissingConfigKeyException;
 use DI\ContainerBuilder;
-use Exception;
 use Psr\Container\ContainerInterface;
 use Symfony\Component\Yaml\Yaml;
 use function array_key_exists;
@@ -22,17 +23,19 @@ use function array_merge;
 use function file_exists;
 use function file_get_contents;
 use function file_put_contents;
+use function is_array;
+use function is_string;
 use function md5_file;
-use function rtrim;
 use function serialize;
 use function unserialize;
-use const DIRECTORY_SEPARATOR;
 
 abstract class AbstractKernel
 {
     public const SETTINGS_KEY = 'kernel';
     public const SETTINGS_DEBUG_KEY = 'debug';
-    public const ROOT_DIR = 'root_dir';
+
+    protected const CACHE_DIRECTORY_PERMISSION = 0744;
+    protected const SERVICES = [];
 
     /**
      * @var self
@@ -76,15 +79,16 @@ abstract class AbstractKernel
 
     /**
      * AbstractKernel constructor.
+     *
      * @param string $rootDir
      *
      * @throws CacheDirectoryException
-     * @throws Exception
      */
     private function __construct(string $rootDir)
     {
-        $cacheDirectory = $this->handleCacheDirectory($rootDir);
-        [SettingsInterface::class => $settings, ParametersInterface::class => $parameters] = $this->handleConfig($rootDir);
+        $pathBuilder    = new PathBuilder($rootDir);
+        $cacheDirectory = $this->handleCacheDirectory($pathBuilder);
+        [SettingsInterface::class => $settings, ParametersInterface::class => $parameters] = $this->handleConfig($pathBuilder);
         if (!array_key_exists(static::SETTINGS_KEY, $settings)) {
             throw new MissingConfigKeyException(static::SETTINGS_KEY);
         }
@@ -99,8 +103,9 @@ abstract class AbstractKernel
 
         $containerBuilder->addDefinitions(array_merge(
             $this->getContainerConfigDefinitions($settings, $parameters),
-            $this->getPathUtilsDefinition($rootDir),
-            $this->getContainerDefinitions()
+            $this->getPathUtilsDefinition($pathBuilder),
+            $this->getConfiguredServicesDefinitions(),
+            $this->getServicesDefinitions()
         ));
 
         $this->container = $containerBuilder->build();
@@ -111,16 +116,14 @@ abstract class AbstractKernel
     }
 
     /**
-     * @param string $rootDir
-     *
+     * @param PathBuilder $pathBuilder
      * @throws CacheDirectoryException
-     *
      * @return string
      */
-    private function handleCacheDirectory(string $rootDir): string
+    private function handleCacheDirectory(PathBuilder $pathBuilder): string
     {
-        $cacheDirectory = $this->getCacheDirectory($rootDir);
-        if (!file_exists($cacheDirectory) && !mkdir($cacheDirectory, 0744, true)) {
+        $cacheDirectory = $this->getCacheDirectory($pathBuilder);
+        if (!file_exists($cacheDirectory) && !mkdir($cacheDirectory, static::CACHE_DIRECTORY_PERMISSION, true)) {
             throw new CacheDirectoryException();
         }
 
@@ -128,17 +131,14 @@ abstract class AbstractKernel
     }
 
     /**
-     * @param string $rootDir
-     *
-     * @throws ConfigFileException
-     *
+     * @param PathBuilder $pathBuilder
      * @return array
      */
-    private function handleConfig(string $rootDir): array
+    private function handleConfig(PathBuilder $pathBuilder): array
     {
-        $cacheDir       = rtrim($this->getCacheDirectory($rootDir), '/\\' . DIRECTORY_SEPARATOR);
-        $parametersPath = $this->getParametersFilePath($rootDir);
-        $settingsPath   = $this->getSettingsFilePath($rootDir);
+        $cacheDir       = $this->getCacheDirectory($pathBuilder);
+        $parametersPath = $this->getParametersFilePath($pathBuilder);
+        $settingsPath   = $this->getSettingsFilePath($pathBuilder);
 
         if (!file_exists($parametersPath) || !file_exists($settingsPath)) {
             throw new ConfigFileException();
@@ -146,7 +146,7 @@ abstract class AbstractKernel
 
         $paramsSum            = md5_file($parametersPath);
         $settingsSum          = md5_file($settingsPath);
-        $cachedConfigFilePath = "$cacheDir/config.$paramsSum.$settingsSum";
+        $cachedConfigFilePath = $pathBuilder->getAbsolutePathFromArray([$cacheDir, "config.$paramsSum.$settingsSum"]);
 
         if (!file_exists($cachedConfigFilePath)) {
             $parameters      = Yaml::parseFile($parametersPath);
@@ -173,40 +173,43 @@ abstract class AbstractKernel
                 Yaml::PARSE_CONSTANT
             );
 
-            file_put_contents($cachedConfigFilePath, serialize([SettingsInterface::class => $settings, ParametersInterface::class => $parameters]));
+            file_put_contents(
+                $cachedConfigFilePath,
+                serialize([SettingsInterface::class => $settings, ParametersInterface::class => $parameters])
+            );
         }
 
         return unserialize($cachedConfigFilePath);
     }
 
     /**
-     * @param string $rootDir
+     * @param PathBuilder $pathBuilder
      *
      * @return string
      */
-    protected function getCacheDirectory(string $rootDir): string
+    protected function getCacheDirectory(PathBuilder $pathBuilder): string
     {
-        return $rootDir . '/var/cache';
+        return $pathBuilder->getAbsolutePath('/var/cache');
     }
 
     /**
-     * @param string $rootDir
+     * @param PathBuilder $pathBuilder
      *
      * @return string
      */
-    protected function getSettingsFilePath(string $rootDir): string
+    protected function getSettingsFilePath(PathBuilder $pathBuilder): string
     {
-        return $rootDir . '/config/settings.yml';
+        return $pathBuilder->getAbsolutePath('/config/settings.yml');
     }
 
     /**
-     * @param string $rootDir
+     * @param PathBuilder $pathBuilder
      *
      * @return string
      */
-    protected function getParametersFilePath(string $rootDir): string
+    protected function getParametersFilePath(PathBuilder $pathBuilder): string
     {
-        return $rootDir . '/config/parameters.yml';
+        return $pathBuilder->getAbsolutePath('/config/parameters.yml');
     }
 
     /**
@@ -231,23 +234,53 @@ abstract class AbstractKernel
     }
 
     /**
-     * @param string $rootDir
+     * @param PathBuilder $pathBuilder
+     * @return array
+     */
+    protected function getPathUtilsDefinition(PathBuilder $pathBuilder): array
+    {
+        return [
+            PathBuilderInterface::class => $pathBuilder,
+        ];
+    }
+
+    /**
+     * @param array|null $servicesDefinitions
      *
      * @return array
      */
-    protected function getPathUtilsDefinition(string $rootDir): array
+    protected function getConfiguredServicesDefinitions(?array $servicesDefinitions = null): array
     {
-        return [];//TODO
+        if (!$servicesDefinitions) {
+            $servicesDefinitions = static::SERVICES;
+        }
+
+        $definitions = [];
+        foreach ($servicesDefinitions as $configKey => $className) {
+            if (!is_array($className)) {
+                $className = [$className];
+            }
+
+            foreach ($className as $fqcn) {
+                $definitions[$fqcn] = function (ContainerInterface $container) use ($fqcn, $configKey) {
+                    if (!is_string($configKey)) {
+                        return new $fqcn($container);
+                    }
+
+                    return new $fqcn($container, $container->get(ConfigInterface::class)->getSetting($configKey));
+                };
+            }
+        }
+
+        return $definitions;
     }
 
     /**
      * @return array
      */
-    protected function getContainerDefinitions(): array
+    protected function getServicesDefinitions(): array
     {
-        return [
-            //TODO - logger, mailer, orm
-        ];
+        return [];
     }
 
     /**
