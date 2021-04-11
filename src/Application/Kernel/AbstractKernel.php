@@ -9,10 +9,10 @@ use Arlisaha\Chozo\Application\Config\Parameters\Parameters;
 use Arlisaha\Chozo\Application\Config\Parameters\ParametersInterface;
 use Arlisaha\Chozo\Application\Config\Settings\Settings;
 use Arlisaha\Chozo\Application\Config\Settings\SettingsInterface;
-use Arlisaha\Chozo\Application\Handlers\HttpErrorHandler;
 use Arlisaha\Chozo\Application\Handlers\ShutdownHandler;
 use Arlisaha\Chozo\Application\PathBuilder\PathBuilder;
 use Arlisaha\Chozo\Application\PathBuilder\PathBuilderInterface;
+use Arlisaha\Chozo\Controller\ControllerInterface;
 use Arlisaha\Chozo\Exception\CacheDirectoryException;
 use Arlisaha\Chozo\Exception\ConfigFileException;
 use Arlisaha\Chozo\Exception\KernelNotCreatedException;
@@ -23,10 +23,9 @@ use DI\ContainerBuilder;
 use DI\DependencyException;
 use DI\NotFoundException;
 use Exception;
-use Psr\Container\ContainerInterface;
+use HaydenPierce\ClassFinder\ClassFinder;
 use Psr\Http\Message\ResponseFactoryInterface;
-use Psr\Http\Message\ServerRequestInterface as Request;
-use Psr\Log\LoggerInterface;
+use Psr\Http\Message\ServerRequestInterface;
 use Slim\App;
 use Slim\Factory\AppFactory;
 use Slim\Factory\ServerRequestCreatorFactory;
@@ -36,11 +35,11 @@ use Slim\Interfaces\ErrorHandlerInterface;
 use Slim\Interfaces\MiddlewareDispatcherInterface;
 use Slim\Interfaces\RouteCollectorInterface;
 use Slim\Interfaces\RouteResolverInterface;
-use Slim\Interfaces\ServerRequestCreatorInterface;
 use Slim\ResponseEmitter;
 use Symfony\Component\Console\Application;
 use Symfony\Component\Yaml\Yaml;
 use function array_key_exists;
+use function array_map;
 use function array_merge;
 use function file_exists;
 use function file_get_contents;
@@ -58,17 +57,20 @@ abstract class AbstractKernel
     public const SETTINGS_KEY = 'kernel';
 
     protected const CACHE_DIRECTORY_PERMISSION = 0744;
+    protected const CACHE_DIR                  = '/var/cache';
+    protected const SETTINGS_PATH              = '/config/settings.yml';
+    protected const PARAMETERS_PATH            = '/config/parameters.yml';
     protected const SERVICES                   = []; //config_key => [services FQCN]
     protected const MIDDLEWARES                = []; // FQCN
-    protected const CONTROLLERS                = []; // namespace => path
+    protected const CONTROLLERS                = []; // namespace
 
     /**
-     * @var self
+     * @var static
      */
     private static $instance;
 
     /**
-     * @var ContainerInterface
+     * @var Container
      */
     private $container;
 
@@ -138,12 +140,12 @@ abstract class AbstractKernel
                 RouteResolverInterface::class        => $this->getRouteResolver(),
                 MiddlewareDispatcherInterface::class => $this->getMiddlewareDispatcher(),
             ],
-            ($this->isCli() ? [] : $this->getControllersDefinitions($pathBuilder)),
             $this->getConfiguredServicesDefinitions(),
             $this->getServicesDefinitions()
         ));
 
         $this->container = $containerBuilder->build();
+        ClassFinder::setAppRoot($pathBuilder->getRootDir());
     }
 
     private function __clone()
@@ -240,7 +242,7 @@ abstract class AbstractKernel
      */
     protected function getCacheDirectory(PathBuilder $pathBuilder): string
     {
-        return $pathBuilder->getAbsolutePath('/var/cache');
+        return $pathBuilder->getAbsolutePath(static::CACHE_DIR);
     }
 
     /**
@@ -250,7 +252,7 @@ abstract class AbstractKernel
      */
     protected function getSettingsFilePath(PathBuilder $pathBuilder): string
     {
-        return $pathBuilder->getAbsolutePath('/config/settings.yml');
+        return $pathBuilder->getAbsolutePath(static::SETTINGS_PATH);
     }
 
     /**
@@ -260,7 +262,7 @@ abstract class AbstractKernel
      */
     protected function getParametersFilePath(PathBuilder $pathBuilder): string
     {
-        return $pathBuilder->getAbsolutePath('/config/parameters.yml');
+        return $pathBuilder->getAbsolutePath(static::PARAMETERS_PATH);
     }
 
     /**
@@ -278,7 +280,7 @@ abstract class AbstractKernel
             ParametersInterface::class => function () use ($parameters) {
                 return new Parameters($parameters);
             },
-            ConfigInterface::class     => function (ContainerInterface $container) {
+            ConfigInterface::class     => function (Container $container) {
                 return new Config($container);
             },
         ];
@@ -313,7 +315,7 @@ abstract class AbstractKernel
             }
 
             foreach ($className as $fqcn) {
-                $definitions[$fqcn] = function (ContainerInterface $container) use ($fqcn, $configKey) {
+                $definitions[$fqcn] = function (Container $container) use ($fqcn, $configKey) {
                     if (!is_string($configKey)) {
                         return new $fqcn($container);
                     }
@@ -389,16 +391,6 @@ abstract class AbstractKernel
     }
 
     /**
-     * @param PathBuilder $pathBuilder
-     *
-     * @return array
-     */
-    protected function getControllersDefinitions(PathBuilder $pathBuilder): array
-    {
-        foreach ()
-    }
-
-    /**
      * @throws Exception
      *
      * @return int
@@ -435,21 +427,54 @@ abstract class AbstractKernel
     }
 
     /**
-     * @param Request         $request
-     * @param callable        $errorHandler
-     * @param ResponseEmitter $responseEmitter
-     * @param bool            $displayErrorDetails
-     * @param bool            $logErrors
-     * @param bool            $logErrorDetails
+     * @throws DependencyException
+     * @throws NotFoundException
+     *
      * @return callable
      */
-    protected function getShutdownHandler(Request $request, callable $errorHandler, ResponseEmitter $responseEmitter, bool $displayErrorDetails, bool $logErrors, bool $logErrorDetails): callable
+    protected function getShutdownHandler(): callable
     {
-        return new ShutdownHandler($request, $errorHandler, $responseEmitter, $displayErrorDetails, $logErrors, $logErrorDetails);
+        $settings            = $this->getContainer()->get(SettingsInterface::class);
+        $displayErrorDetails = $settings->get(static::SETTINGS_KEY . '.display_error_details');
+        $logError            = $settings->get(static::SETTINGS_KEY . '.log_error');
+        $logErrorDetails     = $settings->get(static::SETTINGS_KEY . '.log_error_details');
+
+        return new ShutdownHandler(
+            $this->getContainer()->get(ServerRequestInterface::class),
+            $this->getContainer()->get(ErrorHandlerInterface::class),
+            $this->getContainer()->get(ResponseEmitter::class),
+            $displayErrorDetails, $logError, $logErrorDetails
+        );
+    }
+
+    /**
+     * @param App        $app
+     * @param array|null $controllers
+     */
+    protected function registerControllers(App $app, ?array $controllers = null): void
+    {
+        if (!$controllers) {
+            $controllers = static::CONTROLLERS;
+        }
+
+        $classes = array_map([ClassFinder::class, 'getClassesInNamespace'], $controllers);
+        foreach ($classes as $class) {
+            if (!is_a($class, ControllerInterface::class, true)) {
+                continue;
+            }
+
+            $actions = $class::getRoutes()->getFlattenedChildren();
+            foreach ($actions as $action) {
+                $app->map($action->getMethods(), $action->getPrefixedPattern(), [$class, $action->getAction()]);
+            }
+        }
     }
 
     /**
      * Run web application
+     *
+     * @throws DependencyException
+     * @throws NotFoundException
      *
      * @return int
      */
@@ -464,6 +489,8 @@ abstract class AbstractKernel
         $app = Bridge::create($this->getContainer());
         $app->setBasePath($basePath);
 
+        $this->registerControllers($app);
+
         $app->addBodyParsingMiddleware();
         $app->addRoutingMiddleware();
         $middlewares = $this->getMiddlewares();
@@ -474,20 +501,18 @@ abstract class AbstractKernel
         $serverRequestCreator = ServerRequestCreatorFactory::create();
         $request              = $serverRequestCreator->createServerRequestFromGlobals();
 
+        $this->getContainer()->set(ResponseEmitter::class, $this->getResponseEmitter());
         $this->getContainer()->set(CallableResolverInterface::class, $app->getCallableResolver());
         $this->getContainer()->set(ResponseFactoryInterface::class, $app->getResponseFactory());
-        $this->getContainer()->set(ServerRequestCreatorInterface::class, $request);
+        $this->getContainer()->set(ServerRequestInterface::class, $request);
         $this->getContainer()->set(ErrorHandlerInterface::class, $this->getErrorHandler());
 
-        $shutdownHandler = $this->getShutdownHandler();
-        register_shutdown_function($shutdownHandler);
+        register_shutdown_function($this->getShutdownHandler());
 
         $errorMiddleware = $app->addErrorMiddleware($displayErrorDetails, $logError, $logErrorDetails);
-        $errorMiddleware->setDefaultErrorHandler($errorHandler);
+        $errorMiddleware->setDefaultErrorHandler($this->getContainer()->get(ErrorHandlerInterface::class));
 
-        $response        = $this->app->handle($request);
-        $responseEmitter = $this->getResponseEmitter();
-        $responseEmitter->emit($response);
+        $this->getContainer()->get(ResponseEmitter::class)->emit($app->handle($request));
 
         return 1;
     }
