@@ -54,7 +54,7 @@ abstract class AbstractKernel
      *
      * @return static
      */
-    public static function create(string $rootDir): self
+    public static function create(string $rootDir)
     {
         if (!static::$instance) {
             static::$instance = new static($rootDir);
@@ -68,7 +68,7 @@ abstract class AbstractKernel
      *
      * @return static
      */
-    public static function get(): self
+    public static function get()
     {
         if (!static::$instance) {
             throw new KernelNotCreatedException();
