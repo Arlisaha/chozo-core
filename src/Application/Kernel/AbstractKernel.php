@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace Arlisaha\Chozo\Application\Kernel;
 
+use Arlisaha\Chozo\Application\Cache\CacheHandler;
 use Arlisaha\Chozo\Application\Config\Config;
 use Arlisaha\Chozo\Application\Config\ConfigInterface;
 use Arlisaha\Chozo\Application\Config\Parameters\Parameters;
@@ -12,6 +13,7 @@ use Arlisaha\Chozo\Application\Config\Settings\SettingsInterface;
 use Arlisaha\Chozo\Application\Handlers\ShutdownHandler;
 use Arlisaha\Chozo\Application\PathBuilder\PathBuilder;
 use Arlisaha\Chozo\Application\PathBuilder\PathBuilderInterface;
+use Arlisaha\Chozo\Command\AbstractCommand;
 use Arlisaha\Chozo\Controller\ControllerInterface;
 use Arlisaha\Chozo\Exception\CacheDirectoryException;
 use Arlisaha\Chozo\Exception\ConfigFileException;
@@ -63,6 +65,7 @@ abstract class AbstractKernel
     protected const SERVICES                   = []; //config_key => [services FQCN]
     protected const MIDDLEWARES                = []; // FQCN
     protected const CONTROLLERS                = []; // namespace
+    protected const COMMANDS                   = []; // namespace
 
     /**
      * @var static
@@ -73,6 +76,16 @@ abstract class AbstractKernel
      * @var Container
      */
     private $container;
+
+    /**
+     * @var CacheHandler
+     */
+    private $cacheHandler;
+
+    /**
+     * @var bool
+     */
+    private $isDebug;
 
     /**
      * @param string $rootDir
@@ -114,9 +127,10 @@ abstract class AbstractKernel
      */
     private function __construct(string $rootDir)
     {
-        $debugKey       = 'debug';
-        $pathBuilder    = new PathBuilder($rootDir);
-        $cacheDirectory = $this->handleCacheDirectory($pathBuilder);
+        $debugKey    = 'debug';
+        $pathBuilder = new PathBuilder($rootDir);
+        ClassFinder::setAppRoot($pathBuilder->getRootDir());
+        $this->cacheHandler = new CacheHandler($this->getCacheDirectory($pathBuilder), $pathBuilder, static::CACHE_DIRECTORY_PERMISSION);
         [SettingsInterface::class => $settings, ParametersInterface::class => $parameters] = $this->handleConfig($pathBuilder);
         if (!array_key_exists(static::SETTINGS_KEY, $settings)) {
             throw new MissingConfigKeyException(static::SETTINGS_KEY);
@@ -126,14 +140,16 @@ abstract class AbstractKernel
         }
 
         $containerBuilder = new ContainerBuilder();
-        if ($settings[static::SETTINGS_KEY][$debugKey]) {
-            $containerBuilder->enableCompilation($cacheDirectory);
+        $this->isDebug    = $settings[static::SETTINGS_KEY][$debugKey];
+        if (!$this->isDebug) {
+            $containerBuilder->enableCompilation($this->cacheHandler->getDirectory());
         }
 
         $containerBuilder->addDefinitions(array_merge(
             $this->getContainerConfigDefinitions($settings, $parameters),
             $this->getPathUtilsDefinition($pathBuilder),
             [
+                CacheHandler::class                  => $this->cacheHandler,
                 ResponseFactoryInterface::class      => $this->getResponseFactory(),
                 CallableResolverInterface::class     => $this->getCallableResolver(),
                 RouteCollectorInterface::class       => $this->getRouteCollector(),
@@ -145,7 +161,6 @@ abstract class AbstractKernel
         ));
 
         $this->container = $containerBuilder->build();
-        ClassFinder::setAppRoot($pathBuilder->getRootDir());
     }
 
     private function __clone()
@@ -154,26 +169,11 @@ abstract class AbstractKernel
 
     /**
      * @param PathBuilder $pathBuilder
-     * @throws CacheDirectoryException
-     * @return string
-     */
-    private function handleCacheDirectory(PathBuilder $pathBuilder): string
-    {
-        $cacheDirectory = $this->getCacheDirectory($pathBuilder);
-        if (!file_exists($cacheDirectory) && !mkdir($cacheDirectory, static::CACHE_DIRECTORY_PERMISSION, true)) {
-            throw new CacheDirectoryException();
-        }
-
-        return $cacheDirectory;
-    }
-
-    /**
-     * @param PathBuilder $pathBuilder
+     *
      * @return array
      */
     private function handleConfig(PathBuilder $pathBuilder): array
     {
-        $cacheDir       = $this->getCacheDirectory($pathBuilder);
         $parametersPath = $this->getParametersFilePath($pathBuilder);
         $settingsPath   = $this->getSettingsFilePath($pathBuilder);
 
@@ -181,11 +181,12 @@ abstract class AbstractKernel
             throw new ConfigFileException();
         }
 
-        $paramsSum            = md5_file($parametersPath);
-        $settingsSum          = md5_file($settingsPath);
-        $cachedConfigFilePath = $pathBuilder->getAbsolutePathFromArray([$cacheDir, "config.$paramsSum.$settingsSum"]);
+        $paramsSum    = md5_file($parametersPath);
+        $settingsSum  = md5_file($settingsPath);
+        $filename     = "config.$paramsSum.$settingsSum";
+        $cachedConfig = $this->cacheHandler->get($filename);
 
-        if (!file_exists($cachedConfigFilePath)) {
+        if (!$cachedConfig) {
             $parameters      = Yaml::parseFile($parametersPath);
             $replaceCallback = static function (array $match) use ($parameters) {
                 if (!array_key_exists($match[1], $parameters)) {
@@ -210,13 +211,11 @@ abstract class AbstractKernel
                 Yaml::PARSE_CONSTANT
             );
 
-            file_put_contents(
-                $cachedConfigFilePath,
-                serialize([SettingsInterface::class => $settings, ParametersInterface::class => $parameters])
-            );
+            $cachedConfig = serialize([SettingsInterface::class => $settings, ParametersInterface::class => $parameters]);
+            file_put_contents($filename, $cachedConfig);
         }
 
-        return unserialize($cachedConfigFilePath);
+        return unserialize($cachedConfig);
     }
 
     /**
@@ -233,6 +232,39 @@ abstract class AbstractKernel
     final protected function getContainer(): Container
     {
         return $this->container;
+    }
+
+    /**
+     * @param string[] $namespaces
+     *
+     * @return array
+     */
+    final protected function getClassesFromNamespaces(array $namespaces): array
+    {
+        return array_map([ClassFinder::class, 'getClassesInNamespace'], $namespaces);
+    }
+
+    /**
+     * @param string[] $namespaces
+     * @param string   $cacheName
+     *
+     * @return array
+     */
+    final protected function getClassesFromCache(array $namespaces, string $cacheName): array
+    {
+        if (!$this->isDebug) {
+            $cached = $this->cacheHandler->get($cacheName);
+
+            if (!$cached) {
+                $classes = $this->getClassesFromNamespaces($namespaces);
+                $cached  = serialize($classes);
+                $this->cacheHandler->set($cacheName, $cached);
+            }
+
+            return unserialize($cached);
+        }
+
+        return $this->getClassesFromNamespaces($namespaces);
     }
 
     /**
@@ -288,6 +320,7 @@ abstract class AbstractKernel
 
     /**
      * @param PathBuilder $pathBuilder
+     *
      * @return array
      */
     protected function getPathUtilsDefinition(PathBuilder $pathBuilder): array
@@ -399,7 +432,8 @@ abstract class AbstractKernel
     {
         $app = new Application();
 
-        //TODO
+        $this->registerConsoleHelperSet($app);
+        $this->registerConsoleCommands($app);
 
         return $app->run();
     }
@@ -448,16 +482,24 @@ abstract class AbstractKernel
     }
 
     /**
+     * @return array
+     */
+    protected function getControllerNamespaces(): array
+    {
+        return static::CONTROLLERS;
+    }
+
+    /**
      * @param App        $app
      * @param array|null $controllers
      */
     protected function registerControllers(App $app, ?array $controllers = null): void
     {
         if (!$controllers) {
-            $controllers = static::CONTROLLERS;
+            $controllers = $this->getControllerNamespaces();
         }
 
-        $classes = array_map([ClassFinder::class, 'getClassesInNamespace'], $controllers);
+        $classes = $this->getClassesFromCache($controllers, 'controllers');
         foreach ($classes as $class) {
             if (!is_a($class, ControllerInterface::class, true)) {
                 continue;
@@ -467,6 +509,42 @@ abstract class AbstractKernel
             foreach ($actions as $action) {
                 $app->map($action->getMethods(), $action->getPrefixedPattern(), [$class, $action->getAction()]);
             }
+        }
+    }
+
+    /**
+     * @param Application $application
+     */
+    protected function registerConsoleHelperSet(Application $application): void
+    {
+        $application->getHelperSet();
+    }
+
+    /**
+     * @return array
+     */
+    protected function getCommandNamespaces(): array
+    {
+        return static::COMMANDS;
+    }
+
+    /**
+     * @param Application $application
+     * @param array|null  $commands
+     */
+    protected function registerConsoleCommands(Application $application, ?array $commands = null): void
+    {
+        if (!$commands) {
+            $commands = $this->getCommandNamespaces();
+        }
+
+        $classes = $this->getClassesFromCache($commands, 'commands');
+        foreach ($classes as $class) {
+            if (!is_a($class, AbstractCommand::class, true)) {
+                continue;
+            }
+
+            $application->add(new $class($this->getContainer()));
         }
     }
 
