@@ -13,10 +13,10 @@ use Arlisaha\Chozo\Application\Config\Settings\SettingsInterface;
 use Arlisaha\Chozo\Application\Handlers\ShutdownHandler;
 use Arlisaha\Chozo\Application\PathBuilder\PathBuilder;
 use Arlisaha\Chozo\Application\PathBuilder\PathBuilderInterface;
-use Arlisaha\Chozo\Command\AbstractCommand;
 use Arlisaha\Chozo\Controller\ControllerInterface;
 use Arlisaha\Chozo\Exception\CacheDirectoryException;
 use Arlisaha\Chozo\Exception\ConfigFileException;
+use Arlisaha\Chozo\Exception\InvalidPathException;
 use Arlisaha\Chozo\Exception\KernelNotCreatedException;
 use Arlisaha\Chozo\Exception\MissingConfigKeyException;
 use DI\Bridge\Slim\Bridge;
@@ -28,6 +28,7 @@ use Exception;
 use HaydenPierce\ClassFinder\ClassFinder;
 use Psr\Http\Message\ResponseFactoryInterface;
 use Psr\Http\Message\ServerRequestInterface;
+use Psr\Log\LoggerInterface;
 use Slim\App;
 use Slim\Factory\AppFactory;
 use Slim\Factory\ServerRequestCreatorFactory;
@@ -39,13 +40,15 @@ use Slim\Interfaces\RouteCollectorInterface;
 use Slim\Interfaces\RouteResolverInterface;
 use Slim\ResponseEmitter;
 use Symfony\Component\Console\Application;
+use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Yaml\Yaml;
 use function array_key_exists;
 use function array_map;
 use function array_merge;
+use function error_reporting;
 use function file_exists;
 use function file_get_contents;
-use function file_put_contents;
+use function ini_set;
 use function is_array;
 use function is_string;
 use function md5_file;
@@ -59,7 +62,7 @@ abstract class AbstractKernel
     public const SETTINGS_KEY = 'kernel';
 
     protected const CACHE_DIRECTORY_PERMISSION = 0744;
-    protected const CACHE_DIR                  = '/var/cache';
+    protected const CACHE_DIR                  = '/var/cache/';
     protected const SETTINGS_PATH              = '/config/settings.yml';
     protected const PARAMETERS_PATH            = '/config/parameters.yml';
     protected const SERVICES                   = []; //config_key => [services FQCN]
@@ -70,7 +73,7 @@ abstract class AbstractKernel
     /**
      * @var static
      */
-    private static $instance;
+    protected static $instance;
 
     /**
      * @var Container
@@ -86,6 +89,21 @@ abstract class AbstractKernel
      * @var bool
      */
     private $isDebug;
+
+    /**
+     * @var string[]
+     */
+    private $commandFullyQualifiedClassNames;
+
+    /**
+     * @var string[]
+     */
+    private $controllerFullyQualifiedClassNames;
+
+    /**
+     * @var array[string[]]
+     */
+    private $routes;
 
     /**
      * @param string $rootDir
@@ -130,7 +148,10 @@ abstract class AbstractKernel
         $debugKey    = 'debug';
         $pathBuilder = new PathBuilder($rootDir);
         ClassFinder::setAppRoot($pathBuilder->getRootDir());
-        $this->cacheHandler = new CacheHandler($this->getCacheDirectory($pathBuilder), $pathBuilder, static::CACHE_DIRECTORY_PERMISSION);
+        $this->cacheHandler = new CacheHandler(
+            $this->getCacheDirectory($pathBuilder),
+            $pathBuilder
+        );
         [SettingsInterface::class => $settings, ParametersInterface::class => $parameters] = $this->handleConfig($pathBuilder);
         if (!array_key_exists(static::SETTINGS_KEY, $settings)) {
             throw new MissingConfigKeyException(static::SETTINGS_KEY);
@@ -143,6 +164,35 @@ abstract class AbstractKernel
         $this->isDebug    = $settings[static::SETTINGS_KEY][$debugKey];
         if (!$this->isDebug) {
             $containerBuilder->enableCompilation($this->cacheHandler->getDirectory());
+        } else {
+            error_reporting(0);
+            ini_set('display_errors', '0');
+        }
+
+        $cachedCommands = 'commands.fqcn';
+        if (!$this->isDebug || !($this->commandFullyQualifiedClassNames = $this->cacheHandler->get($cachedCommands, true))) {
+            $this->commandFullyQualifiedClassNames = $this->getConsoleCommands();
+            $this->cacheHandler->set($cachedCommands, $this->commandFullyQualifiedClassNames);
+        }
+        $cachedControllers = 'controllers.fqcn';
+        if (!$this->isDebug || !($this->controllerFullyQualifiedClassNames = $this->cacheHandler->get($cachedControllers, true))) {
+            $this->controllerFullyQualifiedClassNames = $this->getControllers();
+            $this->cacheHandler->set($cachedControllers, $this->controllerFullyQualifiedClassNames);
+        }
+        $cachedRoutes = 'routes';
+        if (!$this->isDebug || !($this->routes = $this->cacheHandler->get($cachedRoutes, true))) {
+            $this->routes = [];
+            foreach ($this->getControllerFullyQualifiedClassNames() as $class) {
+                $actions = $class::getRoutes()->getFlattenedChildren();
+                foreach ($actions as $action) {
+                    $this->routes[] = [
+                        'methods' => $action->getMethods(),
+                        'pattern' => $action->getPrefixedPattern(),
+                        'action'  => [$class, $action->getAction()],
+                    ];
+                }
+            }
+            $this->cacheHandler->set($cachedRoutes, $this->routes);
         }
 
         $containerBuilder->addDefinitions(array_merge(
@@ -156,6 +206,8 @@ abstract class AbstractKernel
                 RouteResolverInterface::class        => $this->getRouteResolver(),
                 MiddlewareDispatcherInterface::class => $this->getMiddlewareDispatcher(),
             ],
+            array_map('DI\autowire', $this->getCommandFullyQualifiedClassNames()),
+            array_map('DI\autowire', $this->getControllerFullyQualifiedClassNames()),
             $this->getConfiguredServicesDefinitions(),
             $this->getServicesDefinitions()
         ));
@@ -169,6 +221,8 @@ abstract class AbstractKernel
 
     /**
      * @param PathBuilder $pathBuilder
+     *
+     * @throws InvalidPathException
      *
      * @return array
      */
@@ -193,7 +247,8 @@ abstract class AbstractKernel
                     return $match[0];
                 }
 
-                return $parameters[$match[1]];
+                $val = $parameters[$match[1]];
+                return (is_string($val) ? $val : Yaml::dump($val));
             };
             $pattern         = '~%(.+?)%~';
             $rawParameters   = file_get_contents($parametersPath);
@@ -212,10 +267,60 @@ abstract class AbstractKernel
             );
 
             $cachedConfig = serialize([SettingsInterface::class => $settings, ParametersInterface::class => $parameters]);
-            file_put_contents($filename, $cachedConfig);
+            $this->cacheHandler->set($filename, $cachedConfig);
         }
 
         return unserialize($cachedConfig);
+    }
+
+    /**
+     * @param array|null $controllers
+     *
+     * @throws InvalidPathException
+     *
+     * @return array
+     */
+    private function getControllers(?array $controllers = null): array
+    {
+        if (!$controllers) {
+            $controllers = $this->getControllerNamespaces();
+        }
+
+        $classes = $this->getClassesFromCache($controllers, 'controllers.classes');
+        $defs    = [];
+        foreach ($classes as $class) {
+            if (!is_a($class, ControllerInterface::class, true)) {
+                continue;
+            }
+
+            $defs[] = $class;
+        }
+
+        return $defs;
+    }
+
+    /**
+     * @param array|null $commands
+     *
+     * @return array
+     */
+    private function getConsoleCommands(?array $commands = null): array
+    {
+        if (!$commands) {
+            $commands = $this->getCommandNamespaces();
+        }
+
+        $classes = $this->getClassesFromCache($commands, 'commands.classes');
+        $defs    = [];
+        foreach ($classes as $class) {
+            if (!is_a($class, Command::class, true)) {
+                continue;
+            }
+
+            $defs[] = $class;
+        }
+
+        return $defs;
     }
 
     /**
@@ -235,6 +340,30 @@ abstract class AbstractKernel
     }
 
     /**
+     * @return string[]
+     */
+    final protected function getCommandFullyQualifiedClassNames(): array
+    {
+        return $this->commandFullyQualifiedClassNames;
+    }
+
+    /**
+     * @return string[]|ControllerInterface[]
+     */
+    final protected function getControllerFullyQualifiedClassNames(): array
+    {
+        return $this->controllerFullyQualifiedClassNames;
+    }
+
+    /**
+     * @return array
+     */
+    final protected function getRouteDefinitions(): array
+    {
+        return $this->routes;
+    }
+
+    /**
      * @param string[] $namespaces
      *
      * @return array
@@ -247,6 +376,8 @@ abstract class AbstractKernel
     /**
      * @param string[] $namespaces
      * @param string   $cacheName
+     *
+     * @throws InvalidPathException
      *
      * @return array
      */
@@ -270,31 +401,37 @@ abstract class AbstractKernel
     /**
      * @param PathBuilder $pathBuilder
      *
+     * @throws InvalidPathException
+     *
      * @return string
      */
     protected function getCacheDirectory(PathBuilder $pathBuilder): string
     {
-        return $pathBuilder->getAbsolutePath(static::CACHE_DIR);
+        return $pathBuilder->getAbsolutePath(static::CACHE_DIR, true);
     }
 
     /**
      * @param PathBuilder $pathBuilder
+     *
+     * @throws InvalidPathException
      *
      * @return string
      */
     protected function getSettingsFilePath(PathBuilder $pathBuilder): string
     {
-        return $pathBuilder->getAbsolutePath(static::SETTINGS_PATH);
+        return $pathBuilder->getAbsolutePath(static::SETTINGS_PATH, true);
     }
 
     /**
      * @param PathBuilder $pathBuilder
      *
+     * @throws InvalidPathException
+     *
      * @return string
      */
     protected function getParametersFilePath(PathBuilder $pathBuilder): string
     {
-        return $pathBuilder->getAbsolutePath(static::PARAMETERS_PATH);
+        return $pathBuilder->getAbsolutePath(static::PARAMETERS_PATH, true);
     }
 
     /**
@@ -454,9 +591,11 @@ abstract class AbstractKernel
      */
     protected function getErrorHandler(): ErrorHandlerInterface
     {
+        $c = $this->getContainer();
         return new ErrorHandler(
-            $this->getContainer()->get(CallableResolverInterface::class),
-            $this->getContainer()->get(ResponseFactoryInterface::class)
+            $c->get(CallableResolverInterface::class),
+            $c->get(ResponseFactoryInterface::class),
+            ($c->has(LoggerInterface::class) ? $c->get(LoggerInterface::class) : null)
         );
     }
 
@@ -490,25 +629,12 @@ abstract class AbstractKernel
     }
 
     /**
-     * @param App        $app
-     * @param array|null $controllers
+     * @param App $app
      */
-    protected function registerControllers(App $app, ?array $controllers = null): void
+    protected function registerControllers(App $app): void
     {
-        if (!$controllers) {
-            $controllers = $this->getControllerNamespaces();
-        }
-
-        $classes = $this->getClassesFromCache($controllers, 'controllers');
-        foreach ($classes as $class) {
-            if (!is_a($class, ControllerInterface::class, true)) {
-                continue;
-            }
-
-            $actions = $class::getRoutes()->getFlattenedChildren();
-            foreach ($actions as $action) {
-                $app->map($action->getMethods(), $action->getPrefixedPattern(), [$class, $action->getAction()]);
-            }
+        foreach ($this->getRouteDefinitions() as ['methods' => $methods, 'pattern' => $pattern, 'action' => $action]) {
+            $app->map($methods, $pattern, $action);
         }
     }
 
@@ -530,21 +656,15 @@ abstract class AbstractKernel
 
     /**
      * @param Application $application
-     * @param array|null  $commands
+     *
+     * @throws DependencyException
+     * @throws NotFoundException
      */
-    protected function registerConsoleCommands(Application $application, ?array $commands = null): void
+    protected function registerConsoleCommands(Application $application): void
     {
-        if (!$commands) {
-            $commands = $this->getCommandNamespaces();
-        }
-
-        $classes = $this->getClassesFromCache($commands, 'commands');
-        foreach ($classes as $class) {
-            if (!is_a($class, AbstractCommand::class, true)) {
-                continue;
-            }
-
-            $application->add(new $class($this->getContainer()));
+        $c = $this->getContainer();
+        foreach ($this->getCommandFullyQualifiedClassNames() as $class) {
+            $application->add($c->get($class));
         }
     }
 
@@ -558,7 +678,8 @@ abstract class AbstractKernel
      */
     protected function runAsWebApp(): int
     {
-        $settings            = $this->getContainer()->get(SettingsInterface::class);
+        $c                   = $this->getContainer();
+        $settings            = $c->get(SettingsInterface::class);
         $displayErrorDetails = $settings->get(static::SETTINGS_KEY . '.display_error_details');
         $logError            = $settings->get(static::SETTINGS_KEY . '.log_error');
         $logErrorDetails     = $settings->get(static::SETTINGS_KEY . '.log_error_details');
@@ -579,18 +700,18 @@ abstract class AbstractKernel
         $serverRequestCreator = ServerRequestCreatorFactory::create();
         $request              = $serverRequestCreator->createServerRequestFromGlobals();
 
-        $this->getContainer()->set(ResponseEmitter::class, $this->getResponseEmitter());
-        $this->getContainer()->set(CallableResolverInterface::class, $app->getCallableResolver());
-        $this->getContainer()->set(ResponseFactoryInterface::class, $app->getResponseFactory());
-        $this->getContainer()->set(ServerRequestInterface::class, $request);
-        $this->getContainer()->set(ErrorHandlerInterface::class, $this->getErrorHandler());
+        $c->set(ResponseEmitter::class, $this->getResponseEmitter());
+        $c->set(CallableResolverInterface::class, $app->getCallableResolver());
+        $c->set(ResponseFactoryInterface::class, $app->getResponseFactory());
+        $c->set(ServerRequestInterface::class, $request);
+        $c->set(ErrorHandlerInterface::class, $this->getErrorHandler());
 
         register_shutdown_function($this->getShutdownHandler());
 
         $errorMiddleware = $app->addErrorMiddleware($displayErrorDetails, $logError, $logErrorDetails);
-        $errorMiddleware->setDefaultErrorHandler($this->getContainer()->get(ErrorHandlerInterface::class));
+        $errorMiddleware->setDefaultErrorHandler($c->get(ErrorHandlerInterface::class));
 
-        $this->getContainer()->get(ResponseEmitter::class)->emit($app->handle($request));
+        $c->get(ResponseEmitter::class)->emit($app->handle($request));
 
         return 1;
     }
