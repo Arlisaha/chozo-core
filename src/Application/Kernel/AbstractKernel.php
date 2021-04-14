@@ -3,7 +3,6 @@ declare(strict_types=1);
 
 namespace Arlisaha\Chozo\Application\Kernel;
 
-use Arlisaha\Chozo\Application\Cache\CacheHandler;
 use Arlisaha\Chozo\Application\Config\Config;
 use Arlisaha\Chozo\Application\Config\ConfigInterface;
 use Arlisaha\Chozo\Application\Config\Parameters\Parameters;
@@ -14,7 +13,6 @@ use Arlisaha\Chozo\Application\Handlers\ShutdownHandler;
 use Arlisaha\Chozo\Application\PathBuilder\PathBuilder;
 use Arlisaha\Chozo\Application\PathBuilder\PathBuilderInterface;
 use Arlisaha\Chozo\Controller\ControllerInterface;
-use Arlisaha\Chozo\Exception\CacheDirectoryException;
 use Arlisaha\Chozo\Exception\ConfigFileException;
 use Arlisaha\Chozo\Exception\InvalidPathException;
 use Arlisaha\Chozo\Exception\KernelNotCreatedException;
@@ -26,6 +24,7 @@ use DI\DependencyException;
 use DI\NotFoundException;
 use Exception;
 use HaydenPierce\ClassFinder\ClassFinder;
+use Psr\Cache\InvalidArgumentException;
 use Psr\Http\Message\ResponseFactoryInterface;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Log\LoggerInterface;
@@ -39,9 +38,14 @@ use Slim\Interfaces\MiddlewareDispatcherInterface;
 use Slim\Interfaces\RouteCollectorInterface;
 use Slim\Interfaces\RouteResolverInterface;
 use Slim\ResponseEmitter;
+use Symfony\Component\Cache\Adapter\AdapterInterface;
+use Symfony\Component\Cache\Adapter\ChainAdapter;
+use Symfony\Component\Cache\Adapter\FilesystemAdapter;
+use Symfony\Component\Cache\Adapter\PhpFilesAdapter;
 use Symfony\Component\Console\Application;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Yaml\Yaml;
+use Symfony\Contracts\Cache\ItemInterface;
 use function array_key_exists;
 use function array_map;
 use function array_merge;
@@ -51,16 +55,14 @@ use function file_get_contents;
 use function ini_set;
 use function is_array;
 use function is_string;
-use function md5_file;
 use function register_shutdown_function;
-use function serialize;
-use function unserialize;
 use const PHP_SAPI;
 
 abstract class AbstractKernel
 {
     public const SETTINGS_KEY = 'kernel';
 
+    protected const DEFAULT_CACHE_LIFETIME     = 0;
     protected const CACHE_DIRECTORY_PERMISSION = 0744;
     protected const CACHE_DIR                  = '/var/cache/';
     protected const SETTINGS_PATH              = '/config/settings.yml';
@@ -79,11 +81,6 @@ abstract class AbstractKernel
      * @var Container
      */
     private $container;
-
-    /**
-     * @var CacheHandler
-     */
-    private $cacheHandler;
 
     /**
      * @var bool
@@ -108,11 +105,12 @@ abstract class AbstractKernel
     /**
      * @param string $rootDir
      *
-     * @throws KernelNotCreatedException|CacheDirectoryException
+     * @throws KernelNotCreatedException
+     * @throws InvalidArgumentException
      *
      * @return static
      */
-    public static function create(string $rootDir)
+    public static function create(string $rootDir): AbstractKernel
     {
         if (!static::$instance) {
             static::$instance = new static($rootDir);
@@ -126,7 +124,7 @@ abstract class AbstractKernel
      *
      * @return static
      */
-    public static function get()
+    public static function get(): AbstractKernel
     {
         if (!static::$instance) {
             throw new KernelNotCreatedException();
@@ -140,19 +138,21 @@ abstract class AbstractKernel
      *
      * @param string $rootDir
      *
-     * @throws CacheDirectoryException
      * @throws Exception
+     * @throws InvalidArgumentException
      */
     private function __construct(string $rootDir)
     {
         $debugKey    = 'debug';
         $pathBuilder = new PathBuilder($rootDir);
+        $cacheDir    = $this->getCacheDirectory($pathBuilder);
         ClassFinder::setAppRoot($pathBuilder->getRootDir());
-        $this->cacheHandler = new CacheHandler(
-            $this->getCacheDirectory($pathBuilder),
-            $pathBuilder
-        );
-        [SettingsInterface::class => $settings, ParametersInterface::class => $parameters] = $this->handleConfig($pathBuilder);
+        $cacheHandler = new ChainAdapter([
+            new PhpFilesAdapter('', static::DEFAULT_CACHE_LIFETIME, $cacheDir),
+            new FilesystemAdapter('', static::DEFAULT_CACHE_LIFETIME, $cacheDir),
+        ], static::DEFAULT_CACHE_LIFETIME);
+        $cacheHandler->prune();
+        [SettingsInterface::class => $settings, ParametersInterface::class => $parameters] = $this->handleConfig($pathBuilder, $cacheHandler);
         if (!array_key_exists(static::SETTINGS_KEY, $settings)) {
             throw new MissingConfigKeyException(static::SETTINGS_KEY);
         }
@@ -162,44 +162,38 @@ abstract class AbstractKernel
 
         $containerBuilder = new ContainerBuilder();
         $this->isDebug    = $settings[static::SETTINGS_KEY][$debugKey];
-        if (!$this->isDebug) {
-            $containerBuilder->enableCompilation($this->cacheHandler->getDirectory());
-        } else {
+        if ($this->isDebug) {
             error_reporting(0);
             ini_set('display_errors', '0');
+            $cacheHandler->clear();
+            [SettingsInterface::class => $settings, ParametersInterface::class => $parameters] = $this->handleConfig($pathBuilder, $cacheHandler);
+        } else {
+            $containerBuilder->enableCompilation($cacheDir);
         }
 
-        $cachedCommands = 'commands.fqcn';
-        if (!$this->isDebug || !($this->commandFullyQualifiedClassNames = $this->cacheHandler->get($cachedCommands, true))) {
-            $this->commandFullyQualifiedClassNames = $this->getConsoleCommands();
-            $this->cacheHandler->set($cachedCommands, $this->commandFullyQualifiedClassNames);
-        }
-        $cachedControllers = 'controllers.fqcn';
-        if (!$this->isDebug || !($this->controllerFullyQualifiedClassNames = $this->cacheHandler->get($cachedControllers, true))) {
-            $this->controllerFullyQualifiedClassNames = $this->getControllers();
-            $this->cacheHandler->set($cachedControllers, $this->controllerFullyQualifiedClassNames);
-        }
-        $cachedRoutes = 'routes';
-        if (!$this->isDebug || !($this->routes = $this->cacheHandler->get($cachedRoutes, true))) {
-            $this->routes = [];
+        $this->commandFullyQualifiedClassNames    = $cacheHandler->get('commands.fqcn', [$this, 'getConsoleCommands']);
+        $this->controllerFullyQualifiedClassNames = $cacheHandler->get('controllers.fqcn', [$this, 'getControllers']);
+        $this->routes                             = $cacheHandler->get('routes', function () {
+            $routes = [];
             foreach ($this->getControllerFullyQualifiedClassNames() as $class) {
                 $actions = $class::getRoutes()->getFlattenedChildren();
                 foreach ($actions as $action) {
-                    $this->routes[] = [
+                    $routes[] = [
                         'methods' => $action->getMethods(),
                         'pattern' => $action->getPrefixedPattern(),
                         'action'  => [$class, $action->getAction()],
                     ];
                 }
             }
-            $this->cacheHandler->set($cachedRoutes, $this->routes);
-        }
+
+            return $routes;
+        });
 
         $containerBuilder->addDefinitions(array_merge(
             $this->getContainerConfigDefinitions($settings, $parameters),
             $this->getPathUtilsDefinition($pathBuilder),
             [
-                CacheHandler::class                  => $this->cacheHandler,
+                AdapterInterface::class              => $cacheHandler,
                 ResponseFactoryInterface::class      => $this->getResponseFactory(),
                 CallableResolverInterface::class     => $this->getCallableResolver(),
                 RouteCollectorInterface::class       => $this->getRouteCollector(),
@@ -220,27 +214,22 @@ abstract class AbstractKernel
     }
 
     /**
-     * @param PathBuilder $pathBuilder
+     * @param PathBuilder      $pathBuilder
+     * @param AdapterInterface $cacheHandler
      *
      * @throws InvalidPathException
      *
      * @return array
      */
-    private function handleConfig(PathBuilder $pathBuilder): array
+    private function handleConfig(PathBuilder $pathBuilder, AdapterInterface $cacheHandler): array
     {
-        $parametersPath = $this->getParametersFilePath($pathBuilder);
-        $settingsPath   = $this->getSettingsFilePath($pathBuilder);
+        return $cacheHandler->get('config', function () use ($pathBuilder) {
+            $parametersPath = $this->getParametersFilePath($pathBuilder);
+            $settingsPath   = $this->getSettingsFilePath($pathBuilder);
 
-        if (!file_exists($parametersPath) || !file_exists($settingsPath)) {
-            throw new ConfigFileException();
-        }
-
-        $paramsSum    = md5_file($parametersPath);
-        $settingsSum  = md5_file($settingsPath);
-        $filename     = "config.$paramsSum.$settingsSum";
-        $cachedConfig = $this->cacheHandler->get($filename);
-
-        if (!$cachedConfig) {
+            if (!file_exists($parametersPath) || !file_exists($settingsPath)) {
+                throw new ConfigFileException();
+            }
             $parameters      = Yaml::parseFile($parametersPath);
             $replaceCallback = static function (array $match) use ($parameters) {
                 if (!array_key_exists($match[1], $parameters)) {
@@ -266,27 +255,20 @@ abstract class AbstractKernel
                 Yaml::PARSE_CONSTANT
             );
 
-            $cachedConfig = serialize([SettingsInterface::class => $settings, ParametersInterface::class => $parameters]);
-            $this->cacheHandler->set($filename, $cachedConfig);
-        }
-
-        return unserialize($cachedConfig);
+            return [SettingsInterface::class => $settings, ParametersInterface::class => $parameters];
+        });
     }
 
     /**
-     * @param array|null $controllers
-     *
-     * @throws InvalidPathException
+     * @param ItemInterface $item
      *
      * @return array
      */
-    private function getControllers(?array $controllers = null): array
+    private function getControllers(ItemInterface $item): array
     {
-        if (!$controllers) {
-            $controllers = $this->getControllerNamespaces();
-        }
+        $controllers = $this->getControllerNamespaces();
 
-        $classes = $this->getClassesFromCache($controllers, 'controllers.classes');
+        $classes = $this->getClassesFromNamespaces($controllers);
         $defs    = [];
         foreach ($classes as $class) {
             if (!is_a($class, ControllerInterface::class, true)) {
@@ -300,17 +282,15 @@ abstract class AbstractKernel
     }
 
     /**
-     * @param array|null $commands
+     * @param ItemInterface $item
      *
      * @return array
      */
-    private function getConsoleCommands(?array $commands = null): array
+    private function getConsoleCommands(ItemInterface $item): array
     {
-        if (!$commands) {
-            $commands = $this->getCommandNamespaces();
-        }
+        $commands = $this->getCommandNamespaces();
 
-        $classes = $this->getClassesFromCache($commands, 'commands.classes');
+        $classes = $this->getClassesFromNamespaces($commands);
         $defs    = [];
         foreach ($classes as $class) {
             if (!is_a($class, Command::class, true)) {
@@ -371,31 +351,6 @@ abstract class AbstractKernel
     final protected function getClassesFromNamespaces(array $namespaces): array
     {
         return array_map([ClassFinder::class, 'getClassesInNamespace'], $namespaces);
-    }
-
-    /**
-     * @param string[] $namespaces
-     * @param string   $cacheName
-     *
-     * @throws InvalidPathException
-     *
-     * @return array
-     */
-    final protected function getClassesFromCache(array $namespaces, string $cacheName): array
-    {
-        if (!$this->isDebug) {
-            $cached = $this->cacheHandler->get($cacheName);
-
-            if (!$cached) {
-                $classes = $this->getClassesFromNamespaces($namespaces);
-                $cached  = serialize($classes);
-                $this->cacheHandler->set($cacheName, $cached);
-            }
-
-            return unserialize($cached);
-        }
-
-        return $this->getClassesFromNamespaces($namespaces);
     }
 
     /**
