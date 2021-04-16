@@ -56,12 +56,15 @@ use function ini_set;
 use function is_array;
 use function is_string;
 use function register_shutdown_function;
+use const E_ALL;
+use const E_NOTICE;
 use const PHP_SAPI;
 
 abstract class AbstractKernel
 {
     public const SETTINGS_KEY = 'kernel';
 
+    protected const DEBUG_ERROR_REPORTING      = E_ALL ~E_NOTICE;
     protected const DEFAULT_CACHE_LIFETIME     = 0;
     protected const CACHE_DIRECTORY_PERMISSION = 0744;
     protected const CACHE_DIR                  = '/var/cache/';
@@ -160,16 +163,20 @@ abstract class AbstractKernel
             throw new MissingConfigKeyException($debugKey, static::SETTINGS_KEY);
         }
 
-        $containerBuilder = new ContainerBuilder();
-        $this->isDebug    = $settings[static::SETTINGS_KEY][$debugKey];
+        $containerBuilder    = new ContainerBuilder();
+        $this->isDebug       = $settings[static::SETTINGS_KEY][$debugKey];
+        $errorReportingLevel = 0;
+        $displayErrorLevel   = '0';
         if ($this->isDebug) {
-            error_reporting(0);
-            ini_set('display_errors', '0');
+            $errorReportingLevel = static::DEBUG_ERROR_REPORTING;
+            $displayErrorLevel   = '1';
             $cacheHandler->clear();
             [SettingsInterface::class => $settings, ParametersInterface::class => $parameters] = $this->handleConfig($pathBuilder, $cacheHandler);
         } else {
             $containerBuilder->enableCompilation($cacheDir);
         }
+        error_reporting($errorReportingLevel);
+        ini_set('display_errors', $displayErrorLevel);
 
         $this->commandFullyQualifiedClassNames    = $cacheHandler->get('commands.fqcn', [$this, 'getConsoleCommands']);
         $this->controllerFullyQualifiedClassNames = $cacheHandler->get('controllers.fqcn', [$this, 'getControllers']);
