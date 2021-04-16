@@ -70,7 +70,7 @@ abstract class AbstractKernel
     protected const CACHE_DIR                  = '/var/cache/';
     protected const SETTINGS_PATH              = '/config/settings.yml';
     protected const PARAMETERS_PATH            = '/config/parameters.yml';
-    protected const SERVICES                   = []; //config_key => [services FQCN]
+    protected const SERVICES                   = []; // config_key => [FQCN(s)]
     protected const MIDDLEWARES                = []; // FQCN
     protected const CONTROLLERS                = []; // namespace
     protected const COMMANDS                   = []; // namespace
