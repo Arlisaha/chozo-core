@@ -137,6 +137,16 @@ abstract class AbstractKernel
     }
 
     /**
+     * @throws KernelNotCreatedException
+     *
+     * @return int
+     */
+    public static function run(): int
+    {
+        return static::get()->runApp();
+    }
+
+    /**
      * AbstractKernel constructor.
      *
      * @param string $rootDir
@@ -683,7 +693,7 @@ abstract class AbstractKernel
      *
      * @return int
      */
-    public function run()
+    public function runApp(): int
     {
         return ($this->isCli() ? $this->runAsCliApp() : $this->runAsWebApp());
     }
