@@ -113,7 +113,7 @@ abstract class AbstractKernel
      *
      * @return static
      */
-    public static function create(string $rootDir): AbstractKernel
+    final public static function create(string $rootDir): AbstractKernel
     {
         if (!static::$instance) {
             static::$instance = new static($rootDir);
@@ -127,7 +127,7 @@ abstract class AbstractKernel
      *
      * @return static
      */
-    public static function get(): AbstractKernel
+    final public static function get(): AbstractKernel
     {
         if (!static::$instance) {
             throw new KernelNotCreatedException();
@@ -142,7 +142,7 @@ abstract class AbstractKernel
      *
      * @return int
      */
-    public static function run(): int
+    final public static function run(): int
     {
         return static::get()->runApp();
     }
@@ -372,6 +372,79 @@ abstract class AbstractKernel
     }
 
     /**
+     * @throws Exception
+     *
+     * @return int
+     */
+    final protected function runAsCliApp(): int
+    {
+        $app = new Application();
+
+        $this->registerConsoleHelperSet($app);
+        $this->registerConsoleCommands($app);
+
+        return $app->run();
+    }
+
+    /**
+     * Run web application
+     *
+     * @throws DependencyException
+     * @throws NotFoundException
+     *
+     * @return int
+     */
+    final protected function runAsWebApp(): int
+    {
+        $c                   = $this->getContainer();
+        $settings            = $c->get(SettingsInterface::class);
+        $displayErrorDetails = $settings->get(static::SETTINGS_KEY . '.display_error_details');
+        $logError            = $settings->get(static::SETTINGS_KEY . '.log_error');
+        $logErrorDetails     = $settings->get(static::SETTINGS_KEY . '.log_error_details');
+        $basePath            = $settings->get(static::SETTINGS_KEY . '.base_path');
+
+        $app = Bridge::create($this->getContainer());
+        $app->setBasePath($basePath);
+
+        $this->registerControllers($app);
+
+        $app->addBodyParsingMiddleware();
+        $app->addRoutingMiddleware();
+        $middlewares = $this->getMiddlewares();
+        foreach ($middlewares as $middleware) {
+            $app->add($middleware);
+        }
+
+        $serverRequestCreator = ServerRequestCreatorFactory::create();
+        $request              = $serverRequestCreator->createServerRequestFromGlobals();
+
+        $c->set(ResponseEmitter::class, $this->getResponseEmitter());
+        $c->set(CallableResolverInterface::class, $app->getCallableResolver());
+        $c->set(ResponseFactoryInterface::class, $app->getResponseFactory());
+        $c->set(ServerRequestInterface::class, $request);
+        $c->set(ErrorHandlerInterface::class, $this->getErrorHandler());
+
+        register_shutdown_function($this->getShutdownHandler());
+
+        $errorMiddleware = $app->addErrorMiddleware($displayErrorDetails, $logError, $logErrorDetails);
+        $errorMiddleware->setDefaultErrorHandler($c->get(ErrorHandlerInterface::class));
+
+        $c->get(ResponseEmitter::class)->emit($app->handle($request));
+
+        return 1;
+    }
+
+    /**
+     * @throws Exception
+     *
+     * @return int
+     */
+    final public function runApp(): int
+    {
+        return ($this->isCli() ? $this->runAsCliApp() : $this->runAsWebApp());
+    }
+
+    /**
      * @param PathBuilder $pathBuilder
      *
      * @throws InvalidPathException
@@ -534,21 +607,6 @@ abstract class AbstractKernel
     }
 
     /**
-     * @throws Exception
-     *
-     * @return int
-     */
-    protected function runAsCliApp(): int
-    {
-        $app = new Application();
-
-        $this->registerConsoleHelperSet($app);
-        $this->registerConsoleCommands($app);
-
-        return $app->run();
-    }
-
-    /**
      * @return ResponseEmitter
      */
     protected function getResponseEmitter(): ResponseEmitter
@@ -639,63 +697,5 @@ abstract class AbstractKernel
         foreach ($this->getCommandFullyQualifiedClassNames() as $class) {
             $application->add($c->get($class));
         }
-    }
-
-    /**
-     * Run web application
-     *
-     * @throws DependencyException
-     * @throws NotFoundException
-     *
-     * @return int
-     */
-    protected function runAsWebApp(): int
-    {
-        $c                   = $this->getContainer();
-        $settings            = $c->get(SettingsInterface::class);
-        $displayErrorDetails = $settings->get(static::SETTINGS_KEY . '.display_error_details');
-        $logError            = $settings->get(static::SETTINGS_KEY . '.log_error');
-        $logErrorDetails     = $settings->get(static::SETTINGS_KEY . '.log_error_details');
-        $basePath            = $settings->get(static::SETTINGS_KEY . '.base_path');
-
-        $app = Bridge::create($this->getContainer());
-        $app->setBasePath($basePath);
-
-        $this->registerControllers($app);
-
-        $app->addBodyParsingMiddleware();
-        $app->addRoutingMiddleware();
-        $middlewares = $this->getMiddlewares();
-        foreach ($middlewares as $middleware) {
-            $app->add($middleware);
-        }
-
-        $serverRequestCreator = ServerRequestCreatorFactory::create();
-        $request              = $serverRequestCreator->createServerRequestFromGlobals();
-
-        $c->set(ResponseEmitter::class, $this->getResponseEmitter());
-        $c->set(CallableResolverInterface::class, $app->getCallableResolver());
-        $c->set(ResponseFactoryInterface::class, $app->getResponseFactory());
-        $c->set(ServerRequestInterface::class, $request);
-        $c->set(ErrorHandlerInterface::class, $this->getErrorHandler());
-
-        register_shutdown_function($this->getShutdownHandler());
-
-        $errorMiddleware = $app->addErrorMiddleware($displayErrorDetails, $logError, $logErrorDetails);
-        $errorMiddleware->setDefaultErrorHandler($c->get(ErrorHandlerInterface::class));
-
-        $c->get(ResponseEmitter::class)->emit($app->handle($request));
-
-        return 1;
-    }
-
-    /**
-     * @throws Exception
-     *
-     * @return int
-     */
-    public function runApp(): int
-    {
-        return ($this->isCli() ? $this->runAsCliApp() : $this->runAsWebApp());
     }
 }
