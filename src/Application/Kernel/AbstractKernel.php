@@ -64,7 +64,7 @@ abstract class AbstractKernel
 {
     public const SETTINGS_KEY = 'kernel';
 
-    protected const DEBUG_ERROR_REPORTING      = E_ALL ~E_NOTICE;
+    protected const DEBUG_ERROR_REPORTING      = E_ALL & ~E_NOTICE;
     protected const DEFAULT_CACHE_LIFETIME     = 0;
     protected const CACHE_DIRECTORY_PERMISSION = 0744;
     protected const CACHE_DIR                  = '/var/cache/';
@@ -101,7 +101,7 @@ abstract class AbstractKernel
     private $controllerFullyQualifiedClassNames;
 
     /**
-     * @var array[string[]]
+     * @var array<string[]|array<string[]>>
      */
     private $routes;
 
@@ -138,6 +138,7 @@ abstract class AbstractKernel
 
     /**
      * @throws KernelNotCreatedException
+     * @throws Exception
      *
      * @return int
      */
