@@ -46,6 +46,7 @@ use Symfony\Component\Console\Application;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Yaml\Yaml;
 use Symfony\Contracts\Cache\ItemInterface;
+use Throwable;
 use function array_key_exists;
 use function array_map;
 use function array_merge;
@@ -696,6 +697,35 @@ abstract class AbstractKernel
         $c = $this->getContainer();
         foreach ($this->getCommandFullyQualifiedClassNames() as $class) {
             $application->add($c->get($class));
+        }
+    }
+
+    /**
+     * @param Throwable $exception
+     *
+     * @throws DependencyException
+     * @throws NotFoundException
+     */
+    public function handleErrorOutsideApplication(Throwable $exception): void
+    {
+        if ($this->getContainer()) {
+            if ($this->getContainer()->has(LoggerInterface::class)) {
+                /** @var LoggerInterface $logger */
+                $logger = $this->getContainer()->get(LoggerInterface::class);
+                $logger->error(
+                    $exception->getMessage(),
+                    [
+                        'code'  => $exception->getCode(),
+                        'file'  => $exception->getFile(),
+                        'line'  => $exception->getLine(),
+                        'trace' => $exception->getTrace(),
+                    ]
+                );
+            }
+
+            if ($this->isDebug) {
+                dump($exception);
+            }
         }
     }
 }
