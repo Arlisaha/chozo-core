@@ -6,6 +6,7 @@ namespace Arlisaha\Chozo\Application\PathBuilder;
 use Arlisaha\Chozo\Exception\InvalidPathException;
 use function implode;
 use function in_array;
+use function is_dir;
 use function mkdir;
 use function realpath;
 use const DIRECTORY_SEPARATOR;
@@ -29,7 +30,7 @@ class PathBuilder
      */
     public function __construct(string $rootDir)
     {
-        $this->rootDir = $this->getRtrimmedRealPath($rootDir);
+        $this->rootDir = $this->getRealPath($rootDir);
     }
 
     /**
@@ -51,7 +52,7 @@ class PathBuilder
      */
     public function getAbsolutePath(string $relativePath, bool $create = false, int $permissions = self::PERMISSION): string
     {
-        return $this->getRtrimmedRealPath($relativePath, $create, $permissions);
+        return $this->getRealPath($relativePath, $create, $permissions);
     }
 
     /**
@@ -93,10 +94,34 @@ class PathBuilder
      *
      * @return string
      */
-    protected function getRtrimmedRealPath(string $path, bool $create = false, int $permissions = self::PERMISSION): string
+    protected function getRealPath(string $path, bool $create = false, int $permissions = self::PERMISSION): string
     {
-        if($path === realpath($path)) {
-            return rtrim($path, implode('', static::SEPARATORS));
+        $computed = $this->rtrimSeparators($this->computeRealPath($path, $create, $permissions));
+
+        if (is_dir($computed)) {
+            return $computed . DIRECTORY_SEPARATOR;
+        }
+
+        return $computed;
+    }
+
+    /**
+     * @param string $path
+     * @param bool   $create
+     * @param int    $permissions
+     *
+     * @throws InvalidPathException
+     *
+     * @return string
+     */
+    protected function computeRealPath(string $path, bool $create, int $permissions): string
+    {
+        $path = $this->rtrimSeparators($path);
+        if (($realPath = realpath($path)) === $path &&
+            in_array($realPath, array_map(static function (string $v) use ($realPath) {
+                return $realPath . $v;
+            }, static::SEPARATORS), true)) {
+            return $realPath;
         }
 
         if (!in_array($path[0], static::SEPARATORS, true)) {
@@ -109,9 +134,19 @@ class PathBuilder
                 throw new InvalidPathException($origPath);
             }
 
-            return $this->getRtrimmedRealPath($origPath, $create, $permissions);
+            return $this->computeRealPath($origPath, $create, $permissions);
         }
 
-        return rtrim($path, implode('', static::SEPARATORS));
+        return $path;
+    }
+
+    /**
+     * @param string $path
+     *
+     * @return string
+     */
+    protected function rtrimSeparators(string $path): string
+    {
+        return rtrim($path, implode(static::SEPARATORS));
     }
 }
