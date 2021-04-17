@@ -47,9 +47,10 @@ use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Yaml\Yaml;
 use Symfony\Contracts\Cache\ItemInterface;
 use Throwable;
+use function array_fill_keys;
 use function array_key_exists;
-use function array_map;
 use function array_merge;
+use function DI\autowire;
 use function error_reporting;
 use function file_exists;
 use function file_get_contents;
@@ -166,7 +167,6 @@ abstract class AbstractKernel
             new PhpFilesAdapter('', static::DEFAULT_CACHE_LIFETIME, $cacheDir),
             new FilesystemAdapter('', static::DEFAULT_CACHE_LIFETIME, $cacheDir),
         ], static::DEFAULT_CACHE_LIFETIME);
-        $cacheHandler->prune();
         [SettingsInterface::class => $settings, ParametersInterface::class => $parameters] = $this->handleConfig($pathBuilder, $cacheHandler);
         if (!array_key_exists(static::SETTINGS_KEY, $settings)) {
             throw new MissingConfigKeyException(static::SETTINGS_KEY);
@@ -185,13 +185,18 @@ abstract class AbstractKernel
             $cacheHandler->clear();
             [SettingsInterface::class => $settings, ParametersInterface::class => $parameters] = $this->handleConfig($pathBuilder, $cacheHandler);
         } else {
+            $cacheHandler->prune();
             $containerBuilder->enableCompilation($cacheDir);
         }
         error_reporting($errorReportingLevel);
         ini_set('display_errors', $displayErrorLevel);
 
-        $this->commandFullyQualifiedClassNames    = $cacheHandler->get('commands.fqcn', [$this, 'getConsoleCommands']);
-        $this->controllerFullyQualifiedClassNames = $cacheHandler->get('controllers.fqcn', [$this, 'getControllers']);
+        $this->commandFullyQualifiedClassNames    = $cacheHandler->get('commands.fqcn', function (ItemInterface $item) {
+            return $this->getConsoleCommands($item);
+        });
+        $this->controllerFullyQualifiedClassNames = $cacheHandler->get('controllers.fqcn', function (ItemInterface $item) {
+            return $this->getControllers($item);
+        });
         $this->routes                             = $cacheHandler->get('routes', function () {
             $routes = [];
             foreach ($this->getControllerFullyQualifiedClassNames() as $class) {
@@ -219,8 +224,8 @@ abstract class AbstractKernel
                 RouteResolverInterface::class        => $this->getRouteResolver(),
                 MiddlewareDispatcherInterface::class => $this->getMiddlewareDispatcher(),
             ],
-            array_map('DI\autowire', $this->getCommandFullyQualifiedClassNames()),
-            array_map('DI\autowire', $this->getControllerFullyQualifiedClassNames()),
+            array_fill_keys($this->getCommandFullyQualifiedClassNames(), autowire()),
+            array_fill_keys($this->getControllerFullyQualifiedClassNames(), autowire()),
             $this->getConfiguredServicesDefinitions(),
             $this->getServicesDefinitions()
         ));
@@ -281,6 +286,8 @@ abstract class AbstractKernel
     /**
      * @param ItemInterface $item
      *
+     * @throws Exception
+     *
      * @return array
      */
     private function getControllers(ItemInterface $item): array
@@ -302,6 +309,8 @@ abstract class AbstractKernel
 
     /**
      * @param ItemInterface $item
+     *
+     * @throws Exception
      *
      * @return array
      */
@@ -365,11 +374,18 @@ abstract class AbstractKernel
     /**
      * @param string[] $namespaces
      *
+     * @throws Exception
+     *
      * @return array
      */
     final protected function getClassesFromNamespaces(array $namespaces): array
     {
-        return array_map([ClassFinder::class, 'getClassesInNamespace'], $namespaces);
+        $classes = [];
+        foreach ($namespaces as $namespace) {
+            $classes = array_merge(ClassFinder::getClassesInNamespace($namespace));
+        }
+
+        return $classes;
     }
 
     /**
@@ -627,7 +643,7 @@ abstract class AbstractKernel
         return new ErrorHandler(
             $c->get(CallableResolverInterface::class),
             $c->get(ResponseFactoryInterface::class),
-            ($c->has(LoggerInterface::class) ? $c->get(LoggerInterface::class) : null)
+            $this->getLogger()
         );
     }
 
@@ -701,6 +717,18 @@ abstract class AbstractKernel
     }
 
     /**
+     * @throws DependencyException
+     * @throws NotFoundException
+     *
+     * @return LoggerInterface|null
+     */
+    public function getLogger(): ?LoggerInterface
+    {
+        $c = $this->getContainer();
+        return ($c->has(LoggerInterface::class) ? $c->get(LoggerInterface::class) : null);
+    }
+
+    /**
      * @param Throwable $exception
      *
      * @throws DependencyException
@@ -709,9 +737,7 @@ abstract class AbstractKernel
     public function handleErrorOutsideApplication(Throwable $exception): void
     {
         if ($this->getContainer()) {
-            if ($this->getContainer()->has(LoggerInterface::class)) {
-                /** @var LoggerInterface $logger */
-                $logger = $this->getContainer()->get(LoggerInterface::class);
+            if (($logger = $this->getLogger())) {
                 $logger->error(
                     $exception->getMessage(),
                     [
