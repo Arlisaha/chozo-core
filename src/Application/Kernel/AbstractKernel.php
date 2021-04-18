@@ -9,11 +9,13 @@ use Arlisaha\Chozo\Application\Config\Parameters\Parameters;
 use Arlisaha\Chozo\Application\Config\Parameters\ParametersInterface;
 use Arlisaha\Chozo\Application\Config\Settings\Settings;
 use Arlisaha\Chozo\Application\Config\Settings\SettingsInterface;
+use Arlisaha\Chozo\Application\Equipment\EquipmentInterface;
 use Arlisaha\Chozo\Application\Handlers\ShutdownHandler;
 use Arlisaha\Chozo\Application\PathBuilder\PathBuilder;
 use Arlisaha\Chozo\Application\PathBuilder\PathBuilderInterface;
 use Arlisaha\Chozo\Controller\ControllerInterface;
 use Arlisaha\Chozo\Exception\ConfigFileException;
+use Arlisaha\Chozo\Exception\InvalidEquipmentException;
 use Arlisaha\Chozo\Exception\InvalidPathException;
 use Arlisaha\Chozo\Exception\KernelNotCreatedException;
 use Arlisaha\Chozo\Exception\MissingConfigKeyException;
@@ -50,6 +52,7 @@ use Throwable;
 use function array_fill_keys;
 use function array_key_exists;
 use function array_merge;
+use function array_reduce;
 use function DI\autowire;
 use function error_reporting;
 use function file_exists;
@@ -72,10 +75,11 @@ abstract class AbstractKernel
     protected const CACHE_DIR                  = '/var/cache/';
     protected const SETTINGS_PATH              = '/config/settings.yml';
     protected const PARAMETERS_PATH            = '/config/parameters.yml';
-    protected const SERVICES                   = []; // config_key => [FQCN(s)]
-    protected const MIDDLEWARES                = []; // FQCN
-    protected const CONTROLLERS                = []; // namespace
-    protected const COMMANDS                   = []; // namespace
+    protected const CONTROLLERS                = ['App\\Controller']; // namespace
+    protected const COMMANDS                   = ['App\\Command'];    // namespace
+    protected const SERVICES                   = [];                  // config_key => [FQCN(s)]
+    protected const MIDDLEWARES                = [];                  // FQCN
+    protected const EQUIPMENTS                 = [];                  // FQCN
 
     /**
      * @var static
@@ -106,6 +110,11 @@ abstract class AbstractKernel
      * @var array<string[]|array<string[]>>
      */
     private $routes;
+
+    /**
+     * @var EquipmentInterface[]
+     */
+    private $equipments;
 
     /**
      * @param string $rootDir
@@ -191,6 +200,24 @@ abstract class AbstractKernel
         error_reporting($errorReportingLevel);
         ini_set('display_errors', $displayErrorLevel);
 
+        $this->equipments = [];
+        foreach (static::EQUIPMENTS as $equipment) {
+            if (!is_a($equipment, EquipmentInterface::class, true)) {
+                if ($this->isDebug) {
+                    throw new InvalidEquipmentException($equipment);
+                }
+
+                continue;
+            }
+
+            $this->equipments[$equipment] = new $equipment(
+                ($equipment::SETTINGS_KEY && array_key_exists($equipment::SETTINGS_KEY, $settings) ?
+                    $settings[$equipment::SETTINGS_KEY] : null),
+                $cacheHandler,
+                $this->isDebug
+            );
+        }
+
         $this->commandFullyQualifiedClassNames    = $cacheHandler->get('commands.fqcn', function (ItemInterface $item) {
             return $this->getConsoleCommands($item);
         });
@@ -226,6 +253,9 @@ abstract class AbstractKernel
             ],
             array_fill_keys($this->getCommandFullyQualifiedClassNames(), autowire()),
             array_fill_keys($this->getControllerFullyQualifiedClassNames(), autowire()),
+            array_reduce($this->getEquipments(), static function (array $carry, EquipmentInterface $equipment) {
+                return array_merge($carry, $equipment->getServices());
+            }, []),
             $this->getConfiguredServicesDefinitions(),
             $this->getServicesDefinitions()
         ));
@@ -295,7 +325,11 @@ abstract class AbstractKernel
         $controllers = $this->getControllerNamespaces();
 
         $classes = $this->getClassesFromNamespaces($controllers);
-        $defs    = [];
+        foreach ($this->getEquipments() as $equipment) {
+            $classes = array_merge($equipment->getControllers(), $classes);
+        }
+
+        $defs = [];
         foreach ($classes as $class) {
             if (!is_a($class, ControllerInterface::class, true)) {
                 continue;
@@ -319,7 +353,11 @@ abstract class AbstractKernel
         $commands = $this->getCommandNamespaces();
 
         $classes = $this->getClassesFromNamespaces($commands);
-        $defs    = [];
+        foreach ($this->getEquipments() as $equipment) {
+            $classes = array_merge($equipment->getCommands(), $classes);
+        }
+
+        $defs = [];
         foreach ($classes as $class) {
             if (!is_a($class, Command::class, true)) {
                 continue;
@@ -345,6 +383,14 @@ abstract class AbstractKernel
     final protected function getContainer(): Container
     {
         return $this->container;
+    }
+
+    /**
+     * @return EquipmentInterface[]
+     */
+    final protected function getEquipments(): array
+    {
+        return $this->equipments;
     }
 
     /**
@@ -425,12 +471,7 @@ abstract class AbstractKernel
 
         $this->registerControllers($app);
 
-        $app->addBodyParsingMiddleware();
-        $app->addRoutingMiddleware();
-        $middlewares = $this->getMiddlewares();
-        foreach ($middlewares as $middleware) {
-            $app->add($middleware);
-        }
+        $this->registerMiddlewares($app);
 
         $serverRequestCreator = ServerRequestCreatorFactory::create();
         $request              = $serverRequestCreator->createServerRequestFromGlobals();
@@ -531,15 +572,11 @@ abstract class AbstractKernel
     }
 
     /**
-     * @param array|null $servicesDefinitions
-     *
      * @return array
      */
-    protected function getConfiguredServicesDefinitions(?array $servicesDefinitions = null): array
+    protected function getConfiguredServicesDefinitions(): array
     {
-        if (!$servicesDefinitions) {
-            $servicesDefinitions = static::SERVICES;
-        }
+        $servicesDefinitions = static::SERVICES;
 
         $definitions = [];
         foreach ($servicesDefinitions as $configKey => $className) {
@@ -610,17 +647,23 @@ abstract class AbstractKernel
     }
 
     /**
-     * @param array|null $middlewares
-     *
-     * @return array
+     * @param App $app
      */
-    protected function getMiddlewares(?array $middlewares = null): array
+    protected function registerMiddlewares(App $app): void
     {
-        if (!$middlewares) {
-            $middlewares = static::MIDDLEWARES;
-        }
+        $doRegister = static function (array $middlewares) use ($app): void {
+            foreach ($middlewares as $middleware) {
+                $app->add($middleware);
+            }
+        };
 
-        return $middlewares;
+        $app->addBodyParsingMiddleware();
+        $app->addRoutingMiddleware();
+
+        foreach ($this->getEquipments() as $equipment) {
+            $doRegister($equipment->getMiddlewares());
+        }
+        $doRegister(static::MIDDLEWARES);
     }
 
     /**
