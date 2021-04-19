@@ -254,7 +254,7 @@ abstract class AbstractKernel
             array_fill_keys($this->getCommandFullyQualifiedClassNames(), autowire()),
             array_fill_keys($this->getControllerFullyQualifiedClassNames(), autowire()),
             array_reduce($this->getEquipments(), static function (array $carry, EquipmentInterface $equipment) {
-                return array_merge($carry, $equipment->getServices());
+                return array_merge($carry, $equipment->getServiceClassnames());
             }, []),
             $this->getConfiguredServicesDefinitions(),
             $this->getServicesDefinitions()
@@ -326,7 +326,7 @@ abstract class AbstractKernel
 
         $classes = $this->getClassesFromNamespaces($controllers);
         foreach ($this->getEquipments() as $equipment) {
-            $classes = array_merge($equipment->getControllers(), $classes);
+            $classes = array_merge($equipment->getControllerNamespaces(), $classes);
         }
 
         $defs = [];
@@ -354,7 +354,7 @@ abstract class AbstractKernel
 
         $classes = $this->getClassesFromNamespaces($commands);
         foreach ($this->getEquipments() as $equipment) {
-            $classes = array_merge($equipment->getCommands(), $classes);
+            $classes = array_merge($equipment->getCommandNamespaces(), $classes);
         }
 
         $defs = [];
@@ -661,7 +661,7 @@ abstract class AbstractKernel
         $app->addRoutingMiddleware();
 
         foreach ($this->getEquipments() as $equipment) {
-            $doRegister($equipment->getMiddlewares());
+            $doRegister($equipment->getMiddlewareClassnames());
         }
         $doRegister(static::MIDDLEWARES);
     }

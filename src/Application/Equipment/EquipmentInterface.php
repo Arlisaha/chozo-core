@@ -21,20 +21,20 @@ interface EquipmentInterface
     /**
      * @return array<string,callable>
      */
-    public function getServices(): array;
+    public function getServiceClassnames(): array;
 
     /**
      * @return string[]
      */
-    public function getMiddlewares(): array;
+    public function getMiddlewareClassnames(): array;
 
     /**
      * @return string[]
      */
-    public function getCommands(): array;
+    public function getCommandNamespaces(): array;
 
     /**
      * @return string[]
      */
-    public function getControllers(): array;
+    public function getControllerNamespaces(): array;
 }
