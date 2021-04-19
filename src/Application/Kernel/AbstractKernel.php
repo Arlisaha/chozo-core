@@ -254,9 +254,9 @@ abstract class AbstractKernel
             array_fill_keys($this->getCommandFullyQualifiedClassNames(), autowire()),
             array_fill_keys($this->getControllerFullyQualifiedClassNames(), autowire()),
             array_reduce($this->getEquipments(), static function (array $carry, EquipmentInterface $equipment) {
-                return array_merge($carry, $equipment->getServiceClassnames());
+                return array_merge($carry, $equipment->getServices());
             }, []),
-            $this->getConfiguredServicesDefinitions(),
+            $this->getConfiguredServicesDefinitions($settings),
             $this->getServicesDefinitions()
         ));
 
@@ -493,6 +493,32 @@ abstract class AbstractKernel
     }
 
     /**
+     * @param array $settings
+     *
+     * @return array
+     */
+    final protected function getConfiguredServicesDefinitions(array $settings): array
+    {
+        $servicesDefinitions = static::SERVICES;
+
+        $definitions = [];
+        foreach ($servicesDefinitions as $configKey => $className) {
+            if (!is_array($className)) {
+                $className = [$className];
+            }
+
+            foreach ($className as $fqcn) {
+                $definitions[$fqcn] = (array_key_exists($configKey, $settings) ?
+                    autowire($fqcn) :
+                    autowire($fqcn)->constructorParameter('settings', $settings[$configKey])
+                );
+            }
+        }
+
+        return $definitions;
+    }
+
+    /**
      * @throws Exception
      *
      * @return int
@@ -547,15 +573,9 @@ abstract class AbstractKernel
     protected function getContainerConfigDefinitions(array $settings, array $parameters): array
     {
         return [
-            SettingsInterface::class   => function () use ($settings) {
-                return new Settings($settings);
-            },
-            ParametersInterface::class => function () use ($parameters) {
-                return new Parameters($parameters);
-            },
-            ConfigInterface::class     => function (Container $container) {
-                return new Config($container);
-            },
+            SettingsInterface::class   => autowire(Settings::class)->constructorParameter('configElement', $settings),
+            ParametersInterface::class => autowire(Parameters::class)->constructorParameter('configElement', $parameters),
+            ConfigInterface::class     => autowire(Config::class),
         ];
     }
 
@@ -569,33 +589,6 @@ abstract class AbstractKernel
         return [
             PathBuilderInterface::class => $pathBuilder,
         ];
-    }
-
-    /**
-     * @return array
-     */
-    protected function getConfiguredServicesDefinitions(): array
-    {
-        $servicesDefinitions = static::SERVICES;
-
-        $definitions = [];
-        foreach ($servicesDefinitions as $configKey => $className) {
-            if (!is_array($className)) {
-                $className = [$className];
-            }
-
-            foreach ($className as $fqcn) {
-                $definitions[$fqcn] = function (Container $container) use ($fqcn, $configKey) {
-                    if (!is_string($configKey)) {
-                        return new $fqcn($container);
-                    }
-
-                    return new $fqcn($container, $container->get(ConfigInterface::class)->getSetting($configKey));
-                };
-            }
-        }
-
-        return $definitions;
     }
 
     /**

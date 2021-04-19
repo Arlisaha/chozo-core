@@ -21,7 +21,7 @@ interface EquipmentInterface
     /**
      * @return array<string,callable>
      */
-    public function getServiceClassnames(): array;
+    public function getServices(): array;
 
     /**
      * @return string[]

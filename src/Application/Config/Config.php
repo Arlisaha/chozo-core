@@ -4,7 +4,6 @@ namespace Arlisaha\Chozo\Application\Config;
 
 use Arlisaha\Chozo\Application\Config\Parameters\ParametersInterface;
 use Arlisaha\Chozo\Application\Config\Settings\SettingsInterface;
-use Psr\Container\ContainerInterface;
 
 class Config implements ConfigInterface
 {
@@ -20,12 +19,14 @@ class Config implements ConfigInterface
 
     /**
      * Config constructor.
-     * @param ContainerInterface $c
+     *
+     * @param SettingsInterface   $settings
+     * @param ParametersInterface $parameters
      */
-    public function __construct(ContainerInterface $c)
+    public function __construct(SettingsInterface $settings, ParametersInterface $parameters)
     {
-        $this->parameters = $c->get(ParametersInterface::class);
-        $this->settings   = $c->get(SettingsInterface::class);
+        $this->parameters = $parameters;
+        $this->settings   = $settings;
     }
 
     /**
