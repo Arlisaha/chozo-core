@@ -72,6 +72,7 @@ abstract class AbstractKernel
     protected const DEBUG_ERROR_REPORTING      = E_ALL & ~E_NOTICE;
     protected const DEFAULT_CACHE_LIFETIME     = 0;
     protected const CACHE_DIRECTORY_PERMISSION = 0744;
+    protected const SERVICES_CONFIG_PARAM_NAME = 'config';
     protected const CACHE_DIR                  = '/var/cache/';
     protected const SETTINGS_PATH              = '/config/settings.yml';
     protected const PARAMETERS_PATH            = '/config/parameters.yml';
@@ -507,11 +508,17 @@ abstract class AbstractKernel
                 $className = [$className];
             }
 
+            if(array_key_exists($configKey, $settings)) {
+                $config = $settings[$configKey];
+                foreach ($className as $fqcn) {
+                    $definitions[$fqcn] = autowire($fqcn)->constructorParameter(static::SERVICES_CONFIG_PARAM_NAME, $config);
+                }
+
+                continue;
+            }
+
             foreach ($className as $fqcn) {
-                $definitions[$fqcn] = (array_key_exists($configKey, $settings) ?
-                    autowire($fqcn) :
-                    autowire($fqcn)->constructorParameter('settings', $settings[$configKey])
-                );
+                $definitions[$fqcn] = autowire($fqcn);
             }
         }
 
