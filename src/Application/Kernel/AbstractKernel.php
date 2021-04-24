@@ -65,7 +65,7 @@ use const E_ALL;
 use const E_NOTICE;
 use const PHP_SAPI;
 
-abstract class AbstractKernel
+abstract class AbstractKernel implements KernelInterface
 {
     public const SETTINGS_KEY = 'kernel';
 
@@ -118,6 +118,11 @@ abstract class AbstractKernel
     private $equipments;
 
     /**
+     * @var bool
+     */
+    private $running = false;
+
+    /**
      * @param string $rootDir
      *
      * @throws KernelNotCreatedException
@@ -125,7 +130,7 @@ abstract class AbstractKernel
      *
      * @return static
      */
-    final public static function create(string $rootDir): AbstractKernel
+    final public static function create(string $rootDir): KernelInterface
     {
         if (!static::$instance) {
             static::$instance = new static($rootDir);
@@ -139,7 +144,7 @@ abstract class AbstractKernel
      *
      * @return static
      */
-    final public static function get(): AbstractKernel
+    final public static function get(): KernelInterface
     {
         if (!static::$instance) {
             throw new KernelNotCreatedException();
@@ -245,6 +250,7 @@ abstract class AbstractKernel
             $this->getContainerConfigDefinitions($settings, $parameters),
             $this->getPathUtilsDefinition($pathBuilder),
             [
+                KernelInterface::class               => $this,
                 AdapterInterface::class              => $cacheHandler,
                 ResponseFactoryInterface::class      => $this->getResponseFactory(),
                 CallableResolverInterface::class     => $this->getCallableResolver(),
@@ -371,11 +377,13 @@ abstract class AbstractKernel
     }
 
     /**
-     * @return bool
+     * @return static
      */
-    final protected function isCli(): bool
+    private function toggleRunning(): KernelInterface
     {
-        return 'cli' === PHP_SAPI;
+        $this->running = true;
+
+        return $this;
     }
 
     /**
@@ -508,7 +516,7 @@ abstract class AbstractKernel
                 $className = [$className];
             }
 
-            if(array_key_exists($configKey, $settings)) {
+            if (array_key_exists($configKey, $settings)) {
                 $config = $settings[$configKey];
                 foreach ($className as $fqcn) {
                     $definitions[$fqcn] = autowire($fqcn)->constructorParameter(static::SERVICES_CONFIG_PARAM_NAME, $config);
@@ -523,16 +531,6 @@ abstract class AbstractKernel
         }
 
         return $definitions;
-    }
-
-    /**
-     * @throws Exception
-     *
-     * @return int
-     */
-    final public function runApp(): int
-    {
-        return ($this->isCli() ? $this->runAsCliApp() : $this->runAsWebApp());
     }
 
     /**
@@ -757,6 +755,33 @@ abstract class AbstractKernel
         foreach ($this->getCommandFullyQualifiedClassNames() as $class) {
             $application->add($c->get($class));
         }
+    }
+
+    /**
+     * @return bool
+     */
+    final public function isCli(): bool
+    {
+        return 'cli' === PHP_SAPI;
+    }
+
+    /**
+     * @throws Exception
+     *
+     * @return int
+     */
+    final public function runApp(): int
+    {
+        $this->toggleRunning();
+        return ($this->isCli() ? $this->runAsCliApp() : $this->runAsWebApp());
+    }
+
+    /**
+     * @return bool
+     */
+    final public function isRunning(): bool
+    {
+        return $this->running;
     }
 
     /**
