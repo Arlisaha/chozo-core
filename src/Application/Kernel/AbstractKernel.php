@@ -323,9 +323,8 @@ abstract class AbstractKernel implements KernelInterface
     }
 
     /**
-     * @param ItemInterface $item
-     *
-     * @throws Exception
+     * @param ItemInterface        $item
+     * @param ClassFinderInterface $classFinder
      *
      * @return array
      */
@@ -354,6 +353,7 @@ abstract class AbstractKernel implements KernelInterface
      * @param ItemInterface        $item
      * @param ClassFinderInterface $classFinder
      * @throws Exception
+     *
      * @return array
      */
     private function getConsoleCommands(ItemInterface $item, ClassFinderInterface $classFinder): array
