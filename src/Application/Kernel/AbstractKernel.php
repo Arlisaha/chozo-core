@@ -13,6 +13,8 @@ use Arlisaha\Chozo\Application\Equipment\EquipmentInterface;
 use Arlisaha\Chozo\Application\Handlers\ShutdownHandler;
 use Arlisaha\Chozo\Application\PathBuilder\PathBuilder;
 use Arlisaha\Chozo\Application\PathBuilder\PathBuilderInterface;
+use Arlisaha\Chozo\ClassFinder\ClassFinder;
+use Arlisaha\Chozo\ClassFinder\ClassFinderInterface;
 use Arlisaha\Chozo\Controller\ControllerInterface;
 use Arlisaha\Chozo\Exception\ConfigFileException;
 use Arlisaha\Chozo\Exception\InvalidEquipmentException;
@@ -25,7 +27,6 @@ use DI\ContainerBuilder;
 use DI\DependencyException;
 use DI\NotFoundException;
 use Exception;
-use HaydenPierce\ClassFinder\ClassFinder;
 use Psr\Cache\InvalidArgumentException;
 use Psr\Http\Message\ResponseFactoryInterface;
 use Psr\Http\Message\ServerRequestInterface;
@@ -174,10 +175,10 @@ abstract class AbstractKernel implements KernelInterface
      */
     private function __construct(string $rootDir)
     {
-        $debugKey    = 'debug';
-        $pathBuilder = new PathBuilder($rootDir);
-        $cacheDir    = $this->getCacheDirectory($pathBuilder);
-        ClassFinder::setAppRoot($pathBuilder->getRootDir());
+        $debugKey     = 'debug';
+        $pathBuilder  = new PathBuilder($rootDir);
+        $classFinder  = new ClassFinder($pathBuilder->getRootDir());
+        $cacheDir     = $this->getCacheDirectory($pathBuilder);
         $cacheHandler = new ChainAdapter([
             new PhpFilesAdapter('', static::DEFAULT_CACHE_LIFETIME, $cacheDir),
             new FilesystemAdapter('', static::DEFAULT_CACHE_LIFETIME, $cacheDir),
@@ -224,11 +225,11 @@ abstract class AbstractKernel implements KernelInterface
             );
         }
 
-        $this->commandFullyQualifiedClassNames    = $cacheHandler->get('commands.fqcn', function (ItemInterface $item) {
-            return $this->getConsoleCommands($item);
+        $this->commandFullyQualifiedClassNames    = $cacheHandler->get('commands.fqcn', function (ItemInterface $item) use ($classFinder) {
+            return $this->getConsoleCommands($item, $classFinder);
         });
-        $this->controllerFullyQualifiedClassNames = $cacheHandler->get('controllers.fqcn', function (ItemInterface $item) {
-            return $this->getControllers($item);
+        $this->controllerFullyQualifiedClassNames = $cacheHandler->get('controllers.fqcn', function (ItemInterface $item) use ($classFinder) {
+            return $this->getControllers($item, $classFinder);
         });
         $this->routes                             = $cacheHandler->get('routes', function () {
             $routes = [];
@@ -251,6 +252,7 @@ abstract class AbstractKernel implements KernelInterface
             $this->getPathUtilsDefinition($pathBuilder),
             [
                 KernelInterface::class               => $this,
+                ClassFinderInterface::class          => $classFinder,
                 AdapterInterface::class              => $cacheHandler,
                 ResponseFactoryInterface::class      => $this->getResponseFactory(),
                 CallableResolverInterface::class     => $this->getCallableResolver(),
@@ -327,11 +329,11 @@ abstract class AbstractKernel implements KernelInterface
      *
      * @return array
      */
-    private function getControllers(ItemInterface $item): array
+    private function getControllers(ItemInterface $item, ClassFinderInterface $classFinder): array
     {
         $controllers = $this->getControllerNamespaces();
 
-        $classes = $this->getClassesFromNamespaces($controllers);
+        $classes = $this->getClassesFromNamespaces($classFinder, $controllers);
         foreach ($this->getEquipments() as $equipment) {
             $classes = array_merge($equipment->getControllerNamespaces(), $classes);
         }
@@ -349,17 +351,16 @@ abstract class AbstractKernel implements KernelInterface
     }
 
     /**
-     * @param ItemInterface $item
-     *
+     * @param ItemInterface        $item
+     * @param ClassFinderInterface $classFinder
      * @throws Exception
-     *
      * @return array
      */
-    private function getConsoleCommands(ItemInterface $item): array
+    private function getConsoleCommands(ItemInterface $item, ClassFinderInterface $classFinder): array
     {
         $commands = $this->getCommandNamespaces();
 
-        $classes = $this->getClassesFromNamespaces($commands);
+        $classes = $this->getClassesFromNamespaces($classFinder, $commands);
         foreach ($this->getEquipments() as $equipment) {
             $classes = array_merge($equipment->getCommandNamespaces(), $classes);
         }
@@ -427,17 +428,16 @@ abstract class AbstractKernel implements KernelInterface
     }
 
     /**
-     * @param string[] $namespaces
-     *
-     * @throws Exception
+     * @param ClassFinderInterface $classFinder
+     * @param string[]             $namespaces
      *
      * @return array
      */
-    final protected function getClassesFromNamespaces(array $namespaces): array
+    final protected function getClassesFromNamespaces(ClassFinderInterface $classFinder, array $namespaces): array
     {
         $classes = [];
         foreach ($namespaces as $namespace) {
-            $classes = array_merge(ClassFinder::getClassesInNamespace($namespace));
+            $classes = array_merge($classFinder->getClassesInNamespace($namespace));
         }
 
         return $classes;
