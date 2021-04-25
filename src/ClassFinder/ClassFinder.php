@@ -38,12 +38,18 @@ class ClassFinder implements ClassFinderInterface
     private $rootNamespaces;
 
     /**
+     * @var array<string, string>
+     */
+    private $store;
+
+    /**
      * ClassFinder constructor.
      *
      * @param string $appRoot
      */
     public function __construct(string $appRoot)
     {
+        $this->store = [];
         $this->appRoot = $appRoot;
 
         $path = $this->appRoot . 'composer.json';
@@ -109,16 +115,23 @@ class ClassFinder implements ClassFinderInterface
      */
     final protected function getFullyQualifiedClassnameFromPath(string $filename): ?string
     {
+        if(array_key_exists($filename, $this->store)) {
+            return $this->store[$filename];
+        }
+
         $content = file_get_contents($filename);
 
         preg_match('#^(namespace)(\\s+)([A-Za-z0-9\\\\]+?)(\\s*);#sm', $content, $namespaceMatch);
         preg_match('#^(class)(\\s+)([A-Za-z0-9\\\\]+?)\\s#sm', $content, $classMatch);
 
+        $res = null;
         if ($namespaceMatch && array_key_exists(3, $namespaceMatch) && $classMatch && array_key_exists(3, $classMatch)) {
-            return sprintf('%s\\%s', $namespaceMatch[3], $classMatch[3]);
+            $res = sprintf('%s\\%s', $namespaceMatch[3], $classMatch[3]);
         }
 
-        return null;
+        $this->store[$filename] = $res;
+
+        return $res;
     }
 
     /**
