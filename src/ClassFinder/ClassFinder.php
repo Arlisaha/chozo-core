@@ -2,15 +2,28 @@
 
 namespace Arlisaha\Chozo\ClassFinder;
 
+use Arlisaha\Chozo\Exception\InvalidJsonException;
+use Arlisaha\Chozo\Exception\NoComposerFileFoundException;
+use Arlisaha\Chozo\Exception\NoPsr4AutoloadKeyFound;
 use RecursiveDirectoryIterator;
-use RecursiveIteratorIterator;
 use SplFileInfo;
+use function array_filter;
+use function array_key_exists;
+use function array_merge;
+use function array_reduce;
+use function explode;
 use function file_get_contents;
-use function in_array;
-use function is_string;
-use function token_get_all;
-use function token_name;
-use const TOKEN_PARSE;
+use function implode;
+use function json_decode;
+use function json_last_error;
+use function ltrim;
+use function preg_match;
+use function sprintf;
+use function strlen;
+use function strpos;
+use function substr;
+use const DIRECTORY_SEPARATOR;
+use const JSON_ERROR_NONE;
 
 class ClassFinder implements ClassFinderInterface
 {
@@ -31,8 +44,21 @@ class ClassFinder implements ClassFinderInterface
      */
     public function __construct(string $appRoot)
     {
-        $this->appRoot        = $appRoot;
-        $this->rootNamespaces = json_decode(file_get_contents($this->appRoot . 'composer.json'), true)['autoload']['psr-4'];
+        $this->appRoot = $appRoot;
+
+        $path = $this->appRoot . 'composer.json';
+        if (!($content = file_get_contents($path))) {
+            throw new NoComposerFileFoundException($path);
+        }
+        $decoded = json_decode($content, true);
+        if (JSON_ERROR_NONE !== json_last_error()) {
+            throw new InvalidJsonException($path);
+        }
+        if (!array_key_exists('autoload', $decoded) || !array_key_exists('psr-4', $decoded['autoload'])) {
+            throw new NoPsr4AutoloadKeyFound();
+        }
+
+        $this->rootNamespaces = $decoded['autoload']['psr-4'];
     }
 
     /**
@@ -139,7 +165,7 @@ class ClassFinder implements ClassFinderInterface
      */
     public function getClassesInNamespaces(array $namespaces): array
     {
-        return array_reduce($namespaces , function(array $carry, string $namespace) {
+        return array_reduce($namespaces, function (array $carry, string $namespace) {
             return array_merge($carry, $this->getClassesInNamespace($namespace));
         }, []);
     }
