@@ -122,7 +122,7 @@ class ClassFinder implements ClassFinderInterface
         $content = file_get_contents($filename);
 
         preg_match('~^(namespace)(\\s+)([A-Za-z0-9\\\\]+?)(\\s*);~sm', $content, $namespaceMatch);
-        preg_match('~^(class)(\\s+)([A-Za-z0-9\\\\]+?)\\s~sm', $content, $classMatch);
+        preg_match('~^(class)(\\s+)([A-Za-z0-9]+?)\\s~sm', $content, $classMatch);
 
         $res = null;
         if ($namespaceMatch && array_key_exists(3, $namespaceMatch) && $classMatch && array_key_exists(3, $classMatch)) {
